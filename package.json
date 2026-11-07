@@ -1,0 +1,22 @@
+{
+  "name": "code-review-lite",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dockerised multi-reviewer code review pipeline (scaffold).",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}
