@@ -1,0 +1,21 @@
+diff --git "a/back\\slash.txt" "b/back\\slash.txt"
+new file mode 100644
+index 0000000..c2b9552
+--- /dev/null
++++ "b/back\\slash.txt"
+@@ -0,0 +1 @@
++weird
+diff --git "a/quote\"d.txt" "b/quote\"d.txt"
+new file mode 100644
+index 0000000..c2b9552
+--- /dev/null
++++ "b/quote\"d.txt"
+@@ -0,0 +1 @@
++weird
+diff --git "a/tab\there.txt" "b/tab\there.txt"
+new file mode 100644
+index 0000000..c2b9552
+--- /dev/null
++++ "b/tab\there.txt"
+@@ -0,0 +1 @@
++weird

@@ -1,0 +1,9 @@
+diff --git a/dir with space/file name.txt b/dir with space/file name.txt
+index 200ecd3..69e7b0e 100644
+--- a/dir with space/file name.txt	
++++ b/dir with space/file name.txt	
+@@ -6,3 +6,4 @@ spaced 5
+ spaced 6
+ spaced 7
+ spaced 8
++spaced 9

@@ -1,0 +1,16 @@
+diff --git a/rename-edit-old.txt b/rename-edit-new.txt
+similarity index 92%
+rename from rename-edit-old.txt
+rename to rename-edit-new.txt
+index 52426df..511b1ea 100644
+--- a/rename-edit-old.txt
++++ b/rename-edit-new.txt
+@@ -2,7 +2,7 @@ edit me 1
+ edit me 2
+ edit me 3
+ edit me 4
+-edit me 5
++edit me 5 EDITED
+ edit me 6
+ edit me 7
+ edit me 8

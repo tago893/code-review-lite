@@ -34,9 +34,14 @@ export interface Finding {
   readonly reviewer: string;
 }
 
+export type DiffStatus = "added" | "modified" | "deleted" | "renamed";
+
 export interface DiffEntry {
+  /** Path in the base revision. For an added file this equals `newPath`. */
   readonly oldPath: string;
+  /** Path in the head revision. For a deleted file this equals `oldPath`. */
   readonly newPath: string;
+  readonly status: DiffStatus;
   readonly addedLines: readonly string[];
   readonly removedLines: readonly string[];
   /** New-file line numbers of the added lines. */

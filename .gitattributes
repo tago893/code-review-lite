@@ -1,0 +1,2 @@
+# Diff fixtures are byte-exact (CRLF, trailing tabs, no final newline). Never let git normalise them.
+tests/fixtures/** -text
