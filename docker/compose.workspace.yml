@@ -1,0 +1,62 @@
+# Secure reviewer workspace (Task 4B).
+#   raw checkout --(read-only)--> prep --(writes)--> repo_ws / ctx_ws --(read-only)--> agent
+# The agent has no mount of the raw checkout, no .git, and no network except the internal one.
+# The model proxy and the real OpenCode runner join this file in a later task.
+name: crl-workspace
+
+services:
+  # Test only: creates a raw checkout full of synthetic secrets inside a Docker volume.
+  fixture:
+    profiles: [test]
+    build: { context: .., dockerfile: docker/agent.Dockerfile }
+    user: root
+    entrypoint: ["sh", "/fixture.sh"]
+    environment: [MARK1, MARK2, MARK3, MARK4, MARK5, MARK6]
+    volumes:
+      - raw:/raw
+      - ../scripts/make-raw-fixture.sh:/fixture.sh:ro
+
+  prep:
+    build: { context: .., dockerfile: docker/prep.Dockerfile }
+    network_mode: none
+    user: "0"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    pids_limit: 128
+    environment:
+      - REVIEW_SOURCE_DIR=${REVIEW_SOURCE_DIR:-/raw/repo}
+      - REVIEW_DIFF_FILE=${REVIEW_DIFF_FILE:-/raw/diff.patch}
+    volumes:
+      - raw:/raw:ro
+      - repo_ws:/out/repo
+      - ctx_ws:/out/context
+
+  agent:
+    build: { context: .., dockerfile: docker/agent.Dockerfile }
+    depends_on:
+      prep: { condition: service_completed_successfully }
+    networks: [internal]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /home/node:uid=1000,gid=1000,mode=700
+      - /review/out:uid=1000,gid=1000,mode=700
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 2g
+    pids_limit: 512
+    volumes:
+      - repo_ws:/repo:ro
+      - ctx_ws:/review/context:ro
+      - ../scripts/probe-boundary.sh:/probe.sh:ro
+
+volumes:
+  raw: {}
+  repo_ws: {}
+  ctx_ws: {}
+
+networks:
+  internal:
+    internal: true
