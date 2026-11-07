@@ -1,0 +1,42 @@
+# THROWAWAY spike. Two containers:
+#  - proxy: holds GROQ_API_KEY (passed by NAME from the host shell, never written to a file), sole internet egress.
+#  - agent: no key, internal network only (can reach only `proxy`).
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: proxy/Dockerfile
+    environment:
+      - GROQ_API_KEY
+    networks: [internal, egress]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 128
+
+  agent:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    depends_on: [proxy]
+    networks: [internal]
+    environment:
+      - GROQ_BASE_URL=http://proxy:8080/openai/v1
+      - SPIKE_MODELS=${SPIKE_MODELS:-}
+      - LIST_ONLY=${LIST_ONLY:-}
+      - ONLY_E=${ONLY_E:-}
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /home/node:uid=1000,gid=1000,mode=700
+      - /review/out:uid=1000,gid=1000,mode=700
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 2g
+    pids_limit: 512
+
+networks:
+  internal:
+    internal: true
+  egress: {}

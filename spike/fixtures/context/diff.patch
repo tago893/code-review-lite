@@ -1,0 +1,11 @@
+diff --git a/src/users.ts b/src/users.ts
+--- a/src/users.ts
++++ b/src/users.ts
+@@ -1,4 +1,6 @@
+ import { db } from "./db";
+
+ export function findUser(name: string) {
+-  return db.query("SELECT * FROM users WHERE name = $1", [name]);
++  const sql = "SELECT * FROM users WHERE name = '" + name + "'";
++  return db.query(sql);
+ }
