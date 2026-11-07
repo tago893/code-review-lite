@@ -16,10 +16,18 @@ const rawFinding = z.object({
   path: z.string().min(1).max(1000),
 });
 
+/** An item that failed validation: its position and the names of the fields that were wrong, never their values. */
+export interface RejectedItem {
+  readonly index: number;
+  readonly fields: readonly string[];
+}
+
 export interface ParsedReviewerOutput {
   readonly findings: readonly Finding[];
   /** Set when the output was unusable or some items were dropped. A fixed description: it never quotes the output. */
   readonly error?: string;
+  /** Items dropped for being invalid. Present only when there were some. Zero findings plus an `error` is NOT a clean review. */
+  readonly rejected?: readonly RejectedItem[];
 }
 
 /**
@@ -43,17 +51,25 @@ export function parseReviewerOutput(raw: string, reviewer: string): ParsedReview
 
 function validate(items: readonly unknown[], reviewer: string): ParsedReviewerOutput {
   const findings: Finding[] = [];
+  const rejected: RejectedItem[] = [];
   items.forEach((item, index) => {
     const parsed = rawFinding.safeParse(item);
-    if (!parsed.success) return;
+    if (!parsed.success) {
+      const fields = [...new Set(parsed.error.issues.map((i) => String(i.path[0] ?? "(item)")))];
+      rejected.push(Object.freeze({ index, fields: Object.freeze(fields) }));
+      return;
+    }
     const { id, ...rest } = parsed.data;
     findings.push(Object.freeze({ ...rest, id: id ?? `${reviewer}-${index + 1}`, reviewer }));
   });
-  const dropped = items.length - findings.length;
   const frozen = Object.freeze(findings);
-  return dropped === 0
+  return rejected.length === 0
     ? Object.freeze({ findings: frozen })
-    : Object.freeze({ findings: frozen, error: `${dropped} of ${items.length} findings invalid and dropped` });
+    : Object.freeze({
+        findings: frozen,
+        error: `${rejected.length} of ${items.length} findings invalid and dropped`,
+        rejected: Object.freeze(rejected),
+      });
 }
 
 function failure(error: string): ParsedReviewerOutput {

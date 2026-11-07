@@ -86,8 +86,8 @@ Behavior signals, computed deterministically from the added/removed lines and pa
 The reason for each hit is recorded in the run log, so routing decisions are explainable and testable.
 
 Verdict rubric (from the article, bias toward approval):
-- only suggestions / trivial: `approved`
-- only suggestions or warnings without production risk: `approved_with_comments`
+- no findings: `approved`
+- only suggestions (non-blocking), or a single warning without production risk: `approved_with_comments` (reconciled with plan Task 6: suggestions alone are never plain `approved`)
 - multiple warnings suggesting a risk pattern: `minor_issues`
 - any critical or production safety risk: `significant_concerns`
 

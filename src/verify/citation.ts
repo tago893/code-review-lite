@@ -50,7 +50,7 @@ export async function safeResolve(root: string, rel: string): Promise<string> {
  */
 export async function verifyCitation(finding: Finding, ctx: CitationContext): Promise<CitationResult> {
   try {
-    const lines = await readLines(ctx.repoRoot, finding.file);
+    const lines = await readSnapshotLines(ctx.repoRoot, finding.file);
     if (!Number.isInteger(finding.line) || finding.line < 1 || finding.line > lines.length) return rejected("line_out_of_range");
     const evidence = normalizeText(finding.evidence);
     if (evidence.length === 0) return rejected("empty_evidence");
@@ -63,7 +63,8 @@ export async function verifyCitation(finding: Finding, ctx: CitationContext): Pr
   }
 }
 
-async function readLines(repoRoot: string, file: string): Promise<readonly string[]> {
+/** The lines of a file in the snapshot, with the same path, type and size checks as citation verification. */
+export async function readSnapshotLines(repoRoot: string, file: string): Promise<readonly string[]> {
   const real = await safeResolve(repoRoot, file);
   const info = await stat(real);
   if (!info.isFile()) throw new CitationPathError("not_a_file");
