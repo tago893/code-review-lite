@@ -1,0 +1,107 @@
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { gateForModel } from "../workspace/gate.js";
+import { sanitizeEnv } from "../safety/sanitize.js";
+import type { Config } from "../config.js";
+import { buildAgentPermissions, type AgentPermissions } from "./permissions.js";
+import { ReviewerSecurityError, type ReviewerRequest, type ReviewerRunner, type RunnerResult, type SecurityStage } from "./runner.js";
+import { scrubProviderError } from "./scrub.js";
+import { createStructuredCall, type StructuredCall } from "./structured.js";
+
+/** A tool-enabled OpenCode session working in the sanitised snapshot (Phase 1). */
+export interface ExploreSession {
+  explore(input: { model: string; prompt: string; signal?: AbortSignal }): Promise<{ text: string; tokensIn: number; tokensOut: number }>;
+  close(): Promise<void>;
+}
+
+export interface LaunchOptions {
+  readonly repoRoot: string;
+  readonly baseUrl: string;
+  /** Already stripped of credentials. */
+  readonly env: NodeJS.ProcessEnv;
+  readonly permissions: AgentPermissions;
+}
+
+export type OpenCodeLauncher = (options: LaunchOptions) => Promise<ExploreSession>;
+
+export interface OpenCodeRunnerDeps {
+  readonly config: Config;
+  readonly launcher: OpenCodeLauncher;
+  /** The parent environment. It is sanitised before anything is launched. */
+  readonly env?: NodeJS.ProcessEnv;
+  readonly structured?: StructuredCall;
+}
+
+const PHASE2_HEADING = /^## Phase 2\b.*$/m;
+const NO_FINDINGS = "No findings.";
+const EMPTY_FINDINGS = '{"findings":[]}';
+
+/**
+ * The OpenCode-backed ReviewerRunner. Phase 1 is a tool-enabled session over the sanitised read-only snapshot that
+ * writes plain-text notes; Phase 2 is a separate no-tools structured call that may only restate those notes.
+ * Text crosses to a model only through gateForModel: the shared context before Phase 1, and the Phase 1 notes
+ * before Phase 2. If either cannot be sanitised the run fails with ReviewerSecurityError and nothing is sent.
+ * Provider and SDK errors are scrubbed before they leave this module.
+ */
+export function createOpenCodeRunner(deps: OpenCodeRunnerDeps): ReviewerRunner {
+  const env = sanitizeEnv(deps.env ?? process.env);
+  const structured = deps.structured ?? createStructuredCall(deps.config.groqBaseUrl);
+  let session: Promise<ExploreSession> | undefined;
+
+  const sessionFor = (repoRoot: string): Promise<ExploreSession> => {
+    session ??= deps.launcher({ repoRoot, baseUrl: deps.config.groqBaseUrl, env, permissions: buildAgentPermissions(repoRoot) });
+    return session;
+  };
+
+  return {
+    async run(req: ReviewerRequest): Promise<RunnerResult> {
+      const prompts = await loadPrompts(req);
+      const context = gate("phase1_context", await readFile(req.sharedContextPath, "utf8"));
+
+      const explorer = await sessionFor(req.repoRoot).catch((error: unknown) => { throw scrubProviderError(error); });
+      const phase1 = await explorer
+        .explore({ model: req.model, prompt: buildPhase1(prompts, context, req), ...(req.signal ? { signal: req.signal } : {}) })
+        .catch((error: unknown) => { throw scrubProviderError(error); });
+
+      const notes = gate("phase2_notes", phase1.text).trim();
+      if (notes.length === 0) throw Object.assign(new Error("provider_unknown"), { name: "ProviderError" }); // empty notes: a failure, not "no findings"
+      if (notes === NO_FINDINGS) return { raw: EMPTY_FINDINGS, tokensIn: phase1.tokensIn, tokensOut: phase1.tokensOut };
+
+      const phase2 = await structured({ model: req.model, system: prompts.phase2, user: notes, ...(req.signal ? { signal: req.signal } : {}) });
+      return { raw: phase2.content, tokensIn: phase1.tokensIn + phase2.tokensIn, tokensOut: phase1.tokensOut + phase2.tokensOut };
+    },
+  };
+}
+
+function gate(stage: SecurityStage, text: string): string {
+  const result = gateForModel(stage, text);
+  if (result.status !== "ok") throw new ReviewerSecurityError(stage, result.reason);
+  return result.text;
+}
+
+interface Prompts {
+  readonly phase1: string;
+  readonly phase2: string;
+}
+
+/** Our own prompt files (trusted, static, no repository data). The shared file splits at its "## Phase 2" heading. */
+async function loadPrompts(req: ReviewerRequest): Promise<Prompts> {
+  const [shared, category] = await Promise.all([
+    readFile(join(dirname(req.promptPath), "REVIEWER_SHARED.md"), "utf8"),
+    readFile(req.promptPath, "utf8"),
+  ]);
+  const split = PHASE2_HEADING.exec(shared);
+  const at = split?.index ?? shared.length;
+  return { phase1: `${shared.slice(0, at)}\n${category}`, phase2: split ? shared.slice(at) : shared };
+}
+
+function buildPhase1(prompts: Prompts, context: string, req: ReviewerRequest): string {
+  return [
+    prompts.phase1,
+    `Per-file patches are in ${req.patchDir}. The change under review:`,
+    "<shared_context>",
+    context,
+    "</shared_context>",
+    "Investigate now and write your Phase 1 notes.",
+  ].join("\n\n");
+}
