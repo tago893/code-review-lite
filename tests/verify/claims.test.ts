@@ -40,7 +40,7 @@ describe("applyLevels", () => {
 
   it("caps supported findings at warning and labels them", () => {
     const [kept] = applyLevels([critical("a", "semantically_supported")], new Set()).kept;
-    expect(kept).toMatchObject({ severity: "warning", cappedFrom: "critical", label: "supported, not independently confirmed" });
+    expect(kept).toMatchObject({ severity: "warning", cappedFrom: "critical", label: "model-assessed support (coordinator), not independently confirmed" });
   });
 
   it("caps citation-only findings at suggestion and flags them unconfirmed", () => {

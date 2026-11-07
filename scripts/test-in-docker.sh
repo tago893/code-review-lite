@@ -15,6 +15,8 @@ docker run --rm \
     cd /src && tar cf - --exclude=node_modules --exclude=.git --exclude=spike . | (cd /app && tar xf -)
     cd /app
     node --version
+    (apt-get update -qq && apt-get install -y -qq git >/dev/null) 2>&1 | tail -2
+    git config --global user.email t@example.com; git config --global user.name t; git config --global init.defaultBranch main
     npm ci --no-audit --no-fund --loglevel=error
     npx tsc --noEmit && echo "tsc: ok"
     npx vitest run

@@ -13,7 +13,7 @@ const MAX_SEVERITY: Readonly<Record<Exclude<FindingLevel, "refuted">, Severity>>
 
 export const LEVEL_LABEL: Readonly<Record<Exclude<FindingLevel, "refuted">, string>> = {
   citation_valid: "unconfirmed",
-  semantically_supported: "supported, not independently confirmed",
+  semantically_supported: "model-assessed support (coordinator), not independently confirmed",
   independently_confirmed: "confirmed (basis unspecified); not proof of exploitability",
 };
 

@@ -24,12 +24,29 @@ export interface LaunchOptions {
 
 export type OpenCodeLauncher = (options: LaunchOptions) => Promise<ExploreSession>;
 
-export interface OpenCodeRunnerDeps {
+export interface SessionDeps {
   readonly config: Config;
   readonly launcher: OpenCodeLauncher;
   /** The parent environment. It is sanitised before anything is launched. */
   readonly env?: NodeJS.ProcessEnv;
+}
+
+export interface OpenCodeRunnerDeps extends SessionDeps {
   readonly structured?: StructuredCall;
+  /** Share one OpenCode server between reviewers and the coordinator. Created from the launcher when omitted. */
+  readonly sessions?: SessionProvider;
+}
+
+/** Returns the one OpenCode explore session for a workspace, launching it on first use. */
+export type SessionProvider = (repoRoot: string) => Promise<ExploreSession>;
+
+export function createSessionProvider(deps: SessionDeps): SessionProvider {
+  const env = sanitizeEnv(deps.env ?? process.env);
+  let session: Promise<ExploreSession> | undefined;
+  return (repoRoot) => {
+    session ??= deps.launcher({ repoRoot, baseUrl: deps.config.groqBaseUrl, env, permissions: buildAgentPermissions(repoRoot) });
+    return session;
+  };
 }
 
 const PHASE2_HEADING = /^## Phase 2\b.*$/m;
@@ -44,14 +61,8 @@ const EMPTY_FINDINGS = '{"findings":[]}';
  * Provider and SDK errors are scrubbed before they leave this module.
  */
 export function createOpenCodeRunner(deps: OpenCodeRunnerDeps): ReviewerRunner {
-  const env = sanitizeEnv(deps.env ?? process.env);
   const structured = deps.structured ?? createStructuredCall(deps.config.groqBaseUrl);
-  let session: Promise<ExploreSession> | undefined;
-
-  const sessionFor = (repoRoot: string): Promise<ExploreSession> => {
-    session ??= deps.launcher({ repoRoot, baseUrl: deps.config.groqBaseUrl, env, permissions: buildAgentPermissions(repoRoot) });
-    return session;
-  };
+  const sessionFor = deps.sessions ?? createSessionProvider(deps);
 
   return {
     async run(req: ReviewerRequest): Promise<RunnerResult> {

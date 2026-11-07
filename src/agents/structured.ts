@@ -54,14 +54,19 @@ export type FetchLike = (url: string, init: { method: string; headers: Record<st
  * value is a placeholder: the proxy discards it and injects the real key, which this process never holds.
  * Non-2xx responses and malformed bodies become scrubbed errors; the response body is never put in an error.
  */
-export function createStructuredCall(baseUrl: string, fetchFn: FetchLike = fetch as unknown as FetchLike): StructuredCall {
+export function createStructuredCall(
+  baseUrl: string,
+  fetchFn: FetchLike = fetch as unknown as FetchLike,
+  schema: object = FINDINGS_SCHEMA,
+  schemaName = "findings",
+): StructuredCall {
   const url = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
   return async (req) => {
     try {
       const body = JSON.stringify({
         model: req.model,
         messages: [{ role: "system", content: req.system }, { role: "user", content: req.user }],
-        response_format: { type: "json_schema", json_schema: { name: "findings", strict: true, schema: FINDINGS_SCHEMA } },
+        response_format: { type: "json_schema", json_schema: { name: schemaName, strict: true, schema } },
       });
       const init = { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer proxy-placeholder" }, body };
       const response = await fetchFn(url, req.signal ? { ...init, signal: req.signal } : init);
