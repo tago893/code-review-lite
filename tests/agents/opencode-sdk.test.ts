@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TRUSTED_OPENCODE_ENV, boundedFetch } from "../../src/agents/opencode-sdk.js";
+import { INVESTIGATOR_PROMPT, TRUSTED_OPENCODE_ENV, boundedFetch } from "../../src/agents/opencode-sdk.js";
 import { scrubProviderError } from "../../src/agents/scrub.js";
 import { classifyError } from "../../src/resilience/errors.js";
 
@@ -51,5 +51,15 @@ describe("TRUSTED_OPENCODE_ENV", () => {
   it("switches off project config and external skills, so a reviewed repository cannot configure the agent", () => {
     expect(TRUSTED_OPENCODE_ENV).toMatchObject({ OPENCODE_DISABLE_PROJECT_CONFIG: "1", OPENCODE_DISABLE_EXTERNAL_SKILLS: "1" });
     expect(Object.isFrozen(TRUSTED_OPENCODE_ENV)).toBe(true);
+  });
+});
+
+describe("INVESTIGATOR_PROMPT", () => {
+  it("is concise, static and states the read-only, untrusted-evidence and cra_* tool rules", () => {
+    expect(Buffer.byteLength(INVESTIGATOR_PROMPT)).toBeLessThan(1200);
+    expect(INVESTIGATOR_PROMPT).toMatch(/read-only/);
+    expect(INVESTIGATOR_PROMPT).toMatch(/untrusted/);
+    for (const tool of ["cra_glob", "cra_grep", "cra_list", "cra_read"]) expect(INVESTIGATOR_PROMPT).toContain(tool);
+    expect(INVESTIGATOR_PROMPT).not.toContain("<shared_context>"); // the PR context stays in the user message
   });
 });

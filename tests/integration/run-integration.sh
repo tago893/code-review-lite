@@ -73,6 +73,8 @@ for s in "${scenarios[@]}"; do
       has "$d/report.md" "heuristic detector" && pass "confirmed by the deterministic detector, not by model say-so" || fail "no detector confirmation"
       has "$d/report.md" "Verdict: significant_concerns" && pass "verdict follows the rubric (confirmed critical)" || fail "unexpected verdict"
       grep '"has_response_format":true' "$d/requests.jsonl" | grep -q '"has_tools":true' && fail "a structured request carried tools" || pass "structured (Phase 2 / judge / verifier) requests carried no tools"
+      ir=$(cd "$d" && node "$rootn/tests/integration/inspect-requests.mjs" requests.jsonl)
+      echo "$ir" | grep -q '"anyHasInvestigatorPrompt":false' && echo "$ir" | grep -q '"anyHasTools":false' && pass "structured requests do not carry the investigator prompt or tools" || fail "structured requests were affected"
       grep -q '"has_response_format":true' "$d/requests.jsonl" && pass "Phase 2 structured request was made" || fail "no structured request seen"
       ;;
     overflow)
@@ -153,6 +155,10 @@ for s in "${scenarios[@]}"; do
       has "$d/report.md" "investigation_truncated" && pass "the report names the reason: investigation_truncated" || fail "reason missing from the report"
       grep '"event":"tool_call"' "$d/run.jsonl" | grep 'src/server.ts' | grep -q '"status":"completed"' && pass "the capped investigation could still read an unchanged file (src/server.ts)" || fail "unchanged file was not readable"
       grep '"event":"session_cleanup"' "$d/run.jsonl" | grep -q '"abort":"ok".*"idle":true.*"delete":"ok"' && pass "the session was cancelled, confirmed idle and deleted" || fail "session cleanup not confirmed"
+      ir=$(cd "$d" && node "$rootn/tests/integration/inspect-requests.mjs" requests.jsonl); echo "    investigator request: $(echo "$ir" | cut -c1-330)"
+      echo "$ir" | grep -q '"systemIsInvestigatorPrompt":true' && echo "$ir" | grep -q '"systemIsOpenCodeBuiltin":false' && pass "the investigator prompt replaced OpenCode's built-in system prompt" || fail "system prompt not replaced"
+      echo "$ir" | grep -q '"userHasReviewerRules":true' && echo "$ir" | grep -q '"userHasPrContext":true' && pass "the CRA reviewer instructions and PR context are still in the request" || fail "reviewer rules or PR context missing"
+      echo "$ir" | grep -qF '"toolNames":["cra_glob","cra_grep","cra_list","cra_read"]' && pass "the model is still offered exactly the four cra_* tools" || fail "tool set changed"
       ;;
     stepcap_stubborn)
       # Same, but the model ignores the instruction and keeps asking for tools. OpenCode alone would let it run on; the
