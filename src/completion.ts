@@ -9,6 +9,8 @@ export interface ReviewerOutcome {
   readonly executed: boolean;
   /** The parse of its output, when it produced any. */
   readonly parsed?: ParsedReviewerOutput;
+  /** The investigation hit its step limit, so what it found (or did not find) is not a full review. */
+  readonly truncated?: boolean;
 }
 
 export interface CompletionAssessment {
@@ -48,6 +50,7 @@ function problemWith(outcome: ReviewerOutcome): { fatal?: string; partial?: stri
   const parsed = outcome.parsed;
   if (parsed === undefined) return { fatal: "no_output" };
   if (parsed.error !== undefined && parsed.findings.length === 0) return { fatal: `unusable_output (${parsed.error})` };
+  if (outcome.truncated === true) return { fatal: "investigation_truncated (step limit reached)" };
   if (parsed.rejected !== undefined && parsed.rejected.length > 0) {
     return { partial: `${parsed.rejected.length} finding(s) dropped as invalid` };
   }

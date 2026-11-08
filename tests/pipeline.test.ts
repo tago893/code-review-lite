@@ -169,6 +169,22 @@ describe("runReview", () => {
     expect(result.report).toContain("REVIEW INCOMPLETE");
   });
 
+  it("is incomplete, never a clean approval, when a reviewer's investigation hit its step limit with no findings", async () => {
+    const runner: ReviewerRunner = { run: async () => ({ raw: '{"findings":[]}', tokensIn: 10, tokensOut: 5, truncated: true }) };
+    const result = await runReview(input(DIFF_A), deps({ runner }));
+    expect(result).toMatchObject({ completion: "incomplete", verdict: "not_determined", exitCode: 2 });
+    expect(result.report).toContain("REVIEW INCOMPLETE");
+    expect(result.report).toContain("investigation_truncated");
+    expect(result.report).not.toContain("Review verdict: Approved");
+  });
+
+  it("keeps the findings of a truncated investigation but still reports the review incomplete", async () => {
+    const runner: ReviewerRunner = { run: async (req) => ({ raw: JSON.stringify([{ ...raw(), category: req.category }]), tokensIn: 10, tokensOut: 5, truncated: true }) };
+    const result = await runReview(input(DIFF_A), deps({ runner }));
+    expect(result).toMatchObject({ completion: "incomplete", exitCode: 2 });
+    expect(result.report).toContain("investigation_truncated");
+  });
+
   it("is incomplete, not approved, when the coordinator fails", async () => {
     const { runner } = runnerOf((c) => (c === "code_quality" ? [raw()] : []));
     const judge: JudgeFn = async () => { throw new Error("boom"); };

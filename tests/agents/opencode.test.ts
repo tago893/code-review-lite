@@ -65,13 +65,22 @@ describe("createOpenCodeRunner: two-phase flow", () => {
     expect(r.structured[0]?.system).toContain("PHASE TWO RULES");
     expect(r.structured[0]?.user).toBe("Path: src/a.ts\nLine: 3\nCode: x");
     expect(r.structured[0]?.user).not.toContain("diff: src/a.ts changed");
-    expect(result).toEqual({ raw: '{"findings":[]}', tokensIn: 140, tokensOut: 15, tokensKnown: true });
+    expect(result).toEqual({ raw: '{"findings":[]}', tokensIn: 140, tokensOut: 15, tokensKnown: true, truncated: false });
   });
 
   it("skips Phase 2 for an explicit 'No findings.' and returns a valid empty list", async () => {
     const r = recorder("No findings.");
     expect((await runner(r).run(req)).raw).toBe('{"findings":[]}');
     expect(r.structured).toHaveLength(0);
+  });
+
+  it("marks the result truncated when the investigation used its whole step allowance, even if its notes say 'No findings.'", async () => {
+    const launcher: OpenCodeLauncher = async () => ({
+      explore: async (input) => { expect(input.stepLimited).toBe(true); return { text: "No findings.", tokensIn: 100, tokensOut: 10, tokensKnown: true, steps: 10, stepLimitReached: true }; },
+      close: async () => undefined,
+    });
+    const result = await createOpenCodeRunner({ config, launcher, structured: async () => ({ content: "{}", tokensIn: 0, tokensOut: 0 }) }).run(req);
+    expect(result).toMatchObject({ raw: '{"findings":[]}', truncated: true });
   });
 
   it("treats empty notes as a failure, not as 'no findings'", async () => {

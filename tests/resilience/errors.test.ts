@@ -23,6 +23,7 @@ describe("classifyError", () => {
     expect(classifyError(http(400, { message: "This model's maximum context length is 8192 tokens" }))).toEqual({ retryable: false, kind: "context_overflow" });
     expect(classifyError(new Error("Please reduce the length of the messages or completion"))).toEqual({ retryable: false, kind: "context_overflow" });
     expect(classifyError(http(413))).toEqual({ retryable: false, kind: "context_overflow" });
+    expect(classifyError({ name: "StepLimitExceeded" })).toEqual({ retryable: false, kind: "step_limit" });
     expect(classifyError({ code: "context_length_exceeded" })).toEqual({ retryable: false, kind: "context_overflow" });
   });
 

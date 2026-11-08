@@ -2,7 +2,7 @@
  * "server" is an HTTP 5xx from the provider. "transport" is a failure of one of our own HTTP calls (connection reset,
  * a client-side timeout, "fetch failed"): the provider may never have been reached, and the two must not be confused.
  */
-export type ErrorKind = "rate_limit" | "server" | "transport" | "auth" | "context_overflow" | "abort" | "unknown";
+export type ErrorKind = "rate_limit" | "server" | "transport" | "auth" | "context_overflow" | "step_limit" | "abort" | "unknown";
 
 export interface ErrorClass {
   readonly retryable: boolean;
@@ -15,6 +15,9 @@ const CONTEXT_OVERFLOW_MESSAGE =
   /context[_ ]length|context window|maximum context|reduce the length|too many tokens|prompt is too long|request too large/i;
 /** Set on a scrubbed transport error so it is still recognised (and retried) after its original fields are dropped. */
 export const TRANSPORT_MARKER = "CRA_TRANSPORT";
+
+/** Set on a scrubbed step-limit error so it is still recognised after its original fields are dropped. */
+export const STEP_LIMIT_MARKER = "CRA_STEP_LIMIT";
 
 const NETWORK_CODES: ReadonlySet<string> = new Set([
   "ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ECONNREFUSED", "EPIPE", "UND_ERR_SOCKET",
@@ -42,6 +45,7 @@ function classify(err: unknown): ErrorClass {
   const status = statusOf(err);
 
   if (name === "AbortError" || name === "TimeoutError" || code === "ABORT_ERR") return result("abort", false);
+  if (name === "StepLimitExceeded" || code === STEP_LIMIT_MARKER) return result("step_limit", false);
   if (name === "ContextOverflowError" || code === "context_length_exceeded" || status === 413 || CONTEXT_OVERFLOW_MESSAGE.test(message)) return result("context_overflow", false);
   if (status === 401 || status === 403) return result("auth", false);
   if (status === 429) return result("rate_limit", true, retryAfterMs(err, message));

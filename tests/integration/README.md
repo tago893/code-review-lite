@@ -11,8 +11,11 @@ real network topology. Only the model is replaced (by `stub-groq.mjs`) in the sc
 
 ## Scripted scenarios (no key, no tokens)
 ```
-bash tests/integration/run-integration.sh <empty-work-dir> [attack] [obey] [report] [error] [overflow] [ratelimit] [abandon]
+bash tests/integration/run-integration.sh <empty-work-dir> [attack] [obey] [report] [error] [overflow] [ratelimit] [abandon] [stepcap] [stepcap_stubborn]
 ```
+Step-cap scenarios: `stepcap` (a model that never stops by itself but obeys OpenCode's last-step "text only" instruction;
+`REVIEW_INVESTIGATION_STEPS=3`: exactly 3 model calls, review incomplete, unchanged files still readable) and
+`stepcap_stubborn` (a model that ignores the instruction: the driver ends the attempt, non-retryable, review incomplete).
 Lifecycle scenarios (see `docs/execution-lifecycle.md`): `overflow` (provider answers 413: the request is sent once,
 no compaction, tool call still logged, non-retryable, usage reported as unknown), `ratelimit` (always 429, run with
 `REVIEW_SESSION_RETRIES=2`: six attempts, bounded provider requests, every session cleaned up) and `abandon`

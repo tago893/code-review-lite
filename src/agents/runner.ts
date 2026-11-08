@@ -24,6 +24,11 @@ export interface RunnerResult {
   readonly tokensOut: number;
   /** False when the provider reported no usage, so the counts above are not real zeros. */
   readonly tokensKnown?: boolean;
+  /**
+   * The Phase 1 investigation used its whole step allowance. Its notes may be incomplete, so even an empty result must
+   * not be treated as a clean review.
+   */
+  readonly truncated?: boolean;
 }
 
 export interface ReviewerRunner {

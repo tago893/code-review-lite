@@ -11,7 +11,7 @@ import { createStructuredCall, type StructuredCall } from "./structured.js";
 
 /** A tool-enabled OpenCode session working in the sanitised snapshot (Phase 1). */
 export interface ExploreSession {
-  explore(input: { model: string; prompt: string; attemptId: string; signal?: AbortSignal }): Promise<{ text: string; tokensIn: number; tokensOut: number; tokensKnown: boolean }>;
+  explore(input: { model: string; prompt: string; attemptId: string; stepLimited?: boolean; signal?: AbortSignal }): Promise<{ text: string; tokensIn: number; tokensOut: number; tokensKnown: boolean; steps?: number; stepLimitReached?: boolean }>;
   close(): Promise<void>;
 }
 
@@ -79,18 +79,19 @@ export function createOpenCodeRunner(deps: OpenCodeRunnerDeps): ReviewerRunner {
 
       const explorer = await sessionFor(req.repoRoot).catch((error: unknown) => { throw scrubProviderError(error); });
       const phase1 = await explorer
-        .explore({ model: req.model, prompt: buildPhase1(prompts, context, req), attemptId: req.attemptId ?? `${req.category}#1`, ...(req.signal ? { signal: req.signal } : {}) })
+        .explore({ model: req.model, prompt: buildPhase1(prompts, context, req), attemptId: req.attemptId ?? `${req.category}#1`, stepLimited: true, ...(req.signal ? { signal: req.signal } : {}) })
         .catch((error: unknown) => { throw scrubProviderError(error); });
 
       const notes = gate("phase2_notes", phase1.text).trim();
       if (notes.length === 0) throw Object.assign(new Error("provider_unknown"), { name: "ProviderError" }); // empty notes: a failure, not "no findings"
-      if (notes === NO_FINDINGS) return { raw: EMPTY_FINDINGS, tokensIn: phase1.tokensIn, tokensOut: phase1.tokensOut, tokensKnown: phase1.tokensKnown };
+      const truncated = phase1.stepLimitReached === true;
+      if (notes === NO_FINDINGS) return { raw: EMPTY_FINDINGS, tokensIn: phase1.tokensIn, tokensOut: phase1.tokensOut, tokensKnown: phase1.tokensKnown, truncated };
 
       const phase2 = await structured({ model: req.model, system: prompts.phase2, user: notes, ...(req.signal ? { signal: req.signal } : {}) })
         .catch((error: unknown) => { throw keepPhase1Usage(error, phase1); });
       return {
         raw: phase2.content, tokensIn: phase1.tokensIn + phase2.tokensIn, tokensOut: phase1.tokensOut + phase2.tokensOut,
-        tokensKnown: phase1.tokensKnown && phase2.tokensKnown !== false,
+        tokensKnown: phase1.tokensKnown && phase2.tokensKnown !== false, truncated,
       };
     },
   };

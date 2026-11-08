@@ -10,6 +10,9 @@
 //   tools   - turn 1 asks for read of src/users.ts only (a benign tool call), then "No findings."
 //   overflow - turn 1 reads src/users.ts; every later request is answered with a Groq-shaped HTTP 413 (a deterministic
 //             "request too large"). A request that looks like OpenCode's compaction call is logged as kind "compaction".
+//   loop / loop_stubborn - an investigation that never ends by itself: it asks for a tool call on every request that still offers tools,
+//             and only answers with text when a request offers none (what a step cap forces). Each request is logged with
+//             its tool count, tool_choice and the tail of its last message, so a test can see what the cap did.
 //   ratelimit      - always HTTP 429 with retry-after: 1
 //   ratelimit_slow - always HTTP 429 with retry-after: 6
 // The stub checks that the proxy replaced the placeholder with STUB_EXPECT_KEY and prints whether it did.
@@ -49,6 +52,7 @@ function toolTurn(calls) {
 }
 const textTurn = (text) => [chunk({ role: "assistant", content: text }, null), chunk({}, "stop", USAGE)];
 
+const PARTIAL_NOTES = ["Path: src/users.ts", "Notes so far: partial investigation."].join("\n");
 const NOTES = [
   "Path: src/users.ts",
   "Line: 4",
@@ -84,6 +88,20 @@ function respond(body, res) {
       return { kind, stream: wantsStream, toolResults: hasToolResults, answered: 413 };
     }
     parts = compaction ? textTurn("summary") : toolTurn([["read", { filePath: "/repo/src/users.ts" }]]);
+  } else if (MODE === "loop" || MODE === "loop_stubborn") {
+    const toolCount = Array.isArray(body.tools) ? body.tools.length : 0;
+    const results = messages.filter((m) => m.role === "tool").length;
+    const last = messages.at(-1);
+    const tail = String(typeof last?.content === "string" ? last.content : JSON.stringify(last?.content ?? "")).slice(-160);
+    // On its last allowed step OpenCode appends a "respond with text only" message but still offers the tools.
+    // "loop" obeys it; "loop_stubborn" ignores it and keeps asking for tools.
+    const told = /text ONLY/i.test(tail);
+    const offered = toolCount > 0 && body.tool_choice !== "none" && (MODE === "loop_stubborn" || !told);
+    kind = offered ? "loop_tool" : "loop_final";
+    const picks = [["read", { filePath: "/repo/src/users.ts" }], ["read", { filePath: "/repo/src/server.ts" }], ["grep", { pattern: "query" }], ["glob", { pattern: "src/*.ts" }]];
+    parts = offered ? toolTurn([picks[results % picks.length]]) : textTurn(PARTIAL_NOTES);
+    setTimeout(() => sse(res, parts), 600); // a model takes time; this also keeps the cap's enforcement lag realistic
+    return { kind, stream: wantsStream, toolResults: hasToolResults, tools: toolCount, toolChoice: body.tool_choice ?? null, messages: messages.length, lastRole: last?.role ?? null, told, lastTail: tail };
   } else if (MODE === "tools" || MODE === "report") {
     kind = hasToolResults ? "final" : "read";
     parts = hasToolResults ? textTurn(MODE === "report" ? NOTES : "No findings.") : toolTurn([["read", { filePath: "/repo/src/users.ts" }]]);

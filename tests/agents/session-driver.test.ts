@@ -16,10 +16,10 @@ interface Script {
 }
 
 function fakeServer(script: Script) {
-  const state = { t: 0, aborted: false, calls: [] as string[], polls: 0 };
+  const state = { t: 0, aborted: false, calls: [] as string[], polls: 0, prompts: [] as { stepLimited: boolean }[] };
   const api: SessionApi = {
     async create() { state.calls.push("create"); if (script.createThrows) throw new Error("create failed"); return "ses_1"; },
-    async promptAsync() { state.calls.push("promptAsync"); },
+    async promptAsync(_id, prompt) { state.calls.push("promptAsync"); state.prompts.push({ stepLimited: prompt.stepLimited }); },
     async messages() {
       state.polls++;
       if (script.failPolls?.includes(state.polls)) throw Object.assign(new TypeError("fetch failed"), { cause: { code: "UND_ERR_HEADERS_TIMEOUT" } });
@@ -230,5 +230,49 @@ describe("driveSession: transport hiccups and startup", () => {
     const error = await driveSession(s.api, input(), s.opts, s.sink).catch((e: unknown) => e);
     expect(error).toMatchObject({ name: "SessionNeverStarted" });
     expect(classifyError(error)).toMatchObject({ retryable: true, kind: "transport" });
+  });
+});
+
+describe("driveSession: investigation step limit", () => {
+  const readStep = (n: number) => assistant([toolPart(`p${n}`, "read", "completed")], { finish: "tool-calls" });
+  const done = (text = "Notes.") => assistant([{ type: "text", text }]);
+  const finished = (steps: readonly MessageLike[]) => fakeServer({ status: () => undefined, messages: () => [user(), ...steps] });
+
+  it("runs under the capped agent only when a limit is given, and records the steps used", async () => {
+    const capped = finished([readStep(1), done()]);
+    const result = await driveSession(capped.api, input({ stepLimit: 3 }), capped.opts, capped.sink);
+    expect(capped.state.prompts).toEqual([{ stepLimited: true }]);
+    expect(result).toMatchObject({ steps: 2, stepLimitReached: false });
+    expect(capped.trace.find((e) => e.name === "investigation_steps")?.data).toMatchObject({ attemptId: "code_quality#1", steps: 2, stepLimit: 3, limitReached: false, outcome: "finished" });
+
+    const free = finished([readStep(1), done()]);
+    const unlimited = await driveSession(free.api, input(), free.opts, free.sink);
+    expect(free.state.prompts).toEqual([{ stepLimited: false }]);
+    expect(unlimited).toMatchObject({ stepLimitReached: false });
+    expect(names(free.trace)).not.toContain("investigation_steps");
+  });
+
+  it("flags a session that used every allowed step, even though it ended with text, as limit reached", async () => {
+    const s = finished([readStep(1), readStep(2), done("Maximum steps reached. Notes so far.")]);
+    const result = await driveSession(s.api, input({ stepLimit: 3 }), s.opts, s.sink);
+    expect(result).toMatchObject({ steps: 3, stepLimitReached: true, text: "Maximum steps reached. Notes so far." });
+    expect(s.trace.find((e) => e.name === "investigation_steps")?.data).toMatchObject({ steps: 3, stepLimit: 3, limitReached: true, outcome: "finished" });
+  });
+
+  it("ends the attempt, with the usage so far, when the model starts another step past the limit", async () => {
+    const s = fakeServer({ status: () => ({ type: "busy" }), messages: () => [user(), readStep(1), readStep(2), readStep(3), { ...readStep(4), info: { role: "assistant", id: "a4", tokens: { input: 0, output: 0 } } }] });
+    const error = await driveSession(s.api, input({ stepLimit: 3 }), s.opts, s.sink).catch((e: unknown) => e);
+    expect(error).toMatchObject({ name: "StepLimitExceeded", sessionId: "ses_1" });
+    expect(classifyError(error)).toEqual({ retryable: false, kind: "step_limit" });
+    expect((error as { usage?: unknown }).usage).toMatchObject({ complete: false, input: 300 });
+    expect(s.trace.find((e) => e.name === "investigation_steps")?.data).toMatchObject({ outcome: "overrun", steps: 4, stepLimit: 3 });
+    expect(s.state.calls.slice(-2)).toEqual(["abort", "delete"]);
+  });
+
+  it("does not wait for another step: a tool call on the last allowed step is already a violation", async () => {
+    const s = fakeServer({ status: () => ({ type: "busy" }), messages: () => [user(), readStep(1), readStep(2)] });
+    const error = await driveSession(s.api, input({ stepLimit: 2 }), s.opts, s.sink).catch((e: unknown) => e);
+    expect(error).toMatchObject({ name: "StepLimitExceeded" });
+    expect(s.state.t).toBeLessThanOrEqual(1000);
   });
 });

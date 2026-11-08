@@ -13,6 +13,21 @@ const f = (severity: Severity, level: FindingLevel | undefined, claim = "c"): Fi
 
 const ORDER: readonly Verdict[] = ["approved", "approved_with_comments", "minor_issues", "significant_concerns"];
 
+describe("assessCompletion: truncated investigations", () => {
+  const clean = parseReviewerOutput('{"findings":[]}', "code_quality");
+
+  it("is incomplete when a reviewer hit its step limit, even though it reported no findings", () => {
+    const result = assessCompletion([{ reviewer: "code_quality", required: true, executed: true, parsed: clean, truncated: true }]);
+    expect(result.completion).toBe("incomplete");
+    expect(result.reasons.join(" ")).toContain("code_quality: investigation_truncated");
+    expect(decideVerdict(result.completion, [])).toBe("not_determined");
+  });
+
+  it("stays complete for an untruncated clean reviewer", () => {
+    expect(assessCompletion([{ reviewer: "code_quality", required: true, executed: true, parsed: clean }]).completion).toBe("complete");
+  });
+});
+
 describe("decideVerdict", () => {
   it("approves when there are no findings", () => {
     expect(decideVerdict("complete", [])).toBe("approved");

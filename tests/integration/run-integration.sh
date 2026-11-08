@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Real-container integration scenarios with a scripted model (no provider key, no network).
-#   tests/integration/run-integration.sh <work-dir> [scenario...]      scenarios: attack obey report error
+#   tests/integration/run-integration.sh <work-dir> [scenario...]      scenarios: attack obey report error overflow ratelimit abandon stepcap stepcap_stubborn
 # Every scenario runs the real CLI, the real OpenCode SDK, the real prep/agent/proxy containers and the real
 # network topology. Only the model is replaced, by tests/integration/stub-groq.mjs behind the real proxy, which
 # holds a recognisable DUMMY key (never a real one) so key handling can be asserted.
@@ -114,6 +114,40 @@ for s in "${scenarios[@]}"; do
       grep -E '"(check|summary)"' "$work/abandon/probe.out" | sed 's/^/    /' | cut -c1-230
       grep -q '"summary":"ABANDON PROBE","failures":0' "$work/abandon/probe.out" && pass "abandoned attempt leaves no session; replacement never overlaps" || fail "abandon probe reported failures"
       ;;
+    stepcap)
+      # An investigation that would never stop on its own, under a 3-step cap and a model that obeys OpenCode's
+      # "respond with text only" instruction on the last step.
+      make_repo "$work/repo-stepcap"
+      run_case stepcap loop "$work/repo-stepcap" REVIEW_AGENTS=code_quality REVIEW_INVESTIGATION_STEPS=3
+      d="$work/stepcap"
+      echo "  exit=$(rc stepcap)"; sed -n '1,14p' "$d/report.md" | sed 's/^/    /'
+      nt=$(grep -c '"kind":"loop_tool"' "$d/stub.log"); nf=$(grep -c '"kind":"loop_final"' "$d/stub.log")
+      [ "$nt" = 2 ] && [ "$nf" = 1 ] && pass "the cap limited the investigation to 3 model calls (2 with tool calls, then the forced final one)" || fail "investigation made $nt tool-turn and $nf final requests, expected 2 and 1"
+      grep '"kind":"loop_final"' "$d/stub.log" | grep -q '"told":true' && pass "the last step was the one where OpenCode told the model to answer with text only" || fail "final request was not the instructed last step"
+      grep '"event":"investigation_steps"' "$d/run.jsonl" | grep -q '"steps":3.*"stepLimit":3.*"limitReached":true.*"outcome":"finished"' && pass "telemetry records steps=3, stepLimit=3, limitReached=true" || fail "investigation_steps telemetry missing or wrong"
+      [ "$(rc stepcap)" = 2 ] && pass "a capped investigation ends the review incomplete (exit 2)" || fail "exit code $(rc stepcap), expected 2"
+      has "$d/report.md" "Verdict: not_determined" && pass "verdict is not_determined, not a clean approval" || fail "wrong verdict"
+      has "$d/report.md" "investigation_truncated" && pass "the report names the reason: investigation_truncated" || fail "reason missing from the report"
+      grep '"event":"tool_call"' "$d/run.jsonl" | grep 'src/server.ts' | grep -q '"status":"completed"' && pass "the capped investigation could still read an unchanged file (src/server.ts)" || fail "unchanged file was not readable"
+      grep '"event":"session_cleanup"' "$d/run.jsonl" | grep -q '"abort":"ok".*"idle":true.*"delete":"ok"' && pass "the session was cancelled, confirmed idle and deleted" || fail "session cleanup not confirmed"
+      ;;
+    stepcap_stubborn)
+      # Same, but the model ignores the instruction and keeps asking for tools. OpenCode alone would let it run on; the
+      # driver must end the attempt, record it, and not call the review clean.
+      make_repo "$work/repo-stubborn"
+      run_case stepcap_stubborn loop_stubborn "$work/repo-stubborn" REVIEW_AGENTS=code_quality REVIEW_INVESTIGATION_STEPS=3
+      d="$work/stepcap_stubborn"
+      echo "  exit=$(rc stepcap_stubborn)"; sed -n '1,14p' "$d/report.md" | sed 's/^/    /'
+      nt=$(grep -c '"kind":"loop_tool"' "$d/stub.log")
+      [ "$nt" -ge 3 ] && [ "$nt" -le 6 ] && pass "a model that ignored the cap was stopped after $nt tool-turn requests (limit 3, at most one poll interval of overshoot)" || fail "tool-turn requests = $nt, expected 3..6"
+      grep '"event":"investigation_steps"' "$d/run.jsonl" | grep -q '"stepLimit":3.*"limitReached":true.*"outcome":"overrun"' && pass "telemetry records outcome=overrun with limitReached=true" || fail "overrun telemetry missing"
+      grep '"event":"attempt_failed"' "$d/run.jsonl" | grep -q '"kind":"step_limit".*"decision":"stop_not_retryable"' && pass "decision logged: step_limit, stop_not_retryable" || fail "attempt decision not logged"
+      na=$(grep -c '"event":"attempt_start"' "$d/run.jsonl"); [ "$na" = 1 ] && pass "no retry or fallback re-ran the same investigation" || fail "attempts = $na"
+      [ "$(rc stepcap_stubborn)" = 2 ] && pass "exit 2" || fail "exit code $(rc stepcap_stubborn), expected 2"
+      has "$d/report.md" "Verdict: not_determined" && pass "verdict is not_determined" || fail "wrong verdict"
+      has "$d/report.md" "model_step_limit" && pass "failure is named step limit" || fail "failure not named"
+      grep '"event":"session_cleanup"' "$d/run.jsonl" | grep -q '"abort":"ok".*"idle":true.*"delete":"ok"' && pass "the session was cancelled, confirmed idle and deleted" || fail "session cleanup not confirmed"
+      ;;
     error)
       make_repo "$work/repo-error"
       run_case error error "$work/repo-error" REVIEW_AGENTS=security
@@ -123,6 +157,7 @@ for s in "${scenarios[@]}"; do
       has "$d/report.md" "REVIEW INCOMPLETE" && pass "report headline is REVIEW INCOMPLETE" || fail "headline missing"
       has "$d/report.md" "Verdict: not_determined" && pass "verdict is not_determined (not approved)" || fail "wrong verdict"
       ;;
+    *) fail "unknown scenario: $s" ;;
   esac
   # OS-level probe inside an agent container with this scenario's real mounts, network and limits.
   if [ "$s" = report ]; then

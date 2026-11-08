@@ -98,6 +98,7 @@ services:
       - FALLBACK_MODEL
       - REVIEW_TIMEOUT_SCALE
       - REVIEW_SESSION_RETRIES
+      - REVIEW_INVESTIGATION_STEPS
       - REVIEW_AGENTS
     volumes:
       - repo_ws:/repo:ro

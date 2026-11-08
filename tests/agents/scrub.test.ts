@@ -3,6 +3,14 @@ import { scrubProviderError, usageOf } from "../../src/agents/scrub.js";
 import { classifyError } from "../../src/resilience/errors.js";
 import { loadConfig } from "../../src/config.js";
 
+describe("scrubProviderError: step limit", () => {
+  it("keeps a step-limit failure recognisable (and non-retryable) after scrubbing", () => {
+    const scrubbed = scrubProviderError(Object.assign(new Error("secret detail"), { name: "StepLimitExceeded" }));
+    expect(scrubbed.message).toBe("provider_step_limit");
+    expect(classifyError(scrubbed)).toEqual({ retryable: false, kind: "step_limit" });
+  });
+});
+
 describe("scrubProviderError", () => {
   it("keeps an allow-listed OpenCode error name but never its message or data", () => {
     const secret = ["sk", "proj", "abcdefghijklmnopqrstuvwxyz0123456789"].join("-");
@@ -71,6 +79,12 @@ describe("session lifecycle config", () => {
   it("reads REVIEW_SESSION_RETRIES and rejects values outside 1 to 20", () => {
     expect(loadConfig({ ...base, REVIEW_SESSION_RETRIES: "9" }).session.maxProviderRetries).toBe(9);
     for (const bad of ["0", "21", "-1", "x", "2.5"]) expect(() => loadConfig({ ...base, REVIEW_SESSION_RETRIES: bad })).toThrow(/REVIEW_SESSION_RETRIES|Invalid/);
+  });
+
+  it("reads REVIEW_INVESTIGATION_STEPS (default 10) and rejects values outside 1 to 50", () => {
+    expect(loadConfig(base).session.maxInvestigationSteps).toBe(10);
+    expect(loadConfig({ ...base, REVIEW_INVESTIGATION_STEPS: "25" }).session.maxInvestigationSteps).toBe(25);
+    for (const bad of ["0", "51", "-1", "x", "2.5"]) expect(() => loadConfig({ ...base, REVIEW_INVESTIGATION_STEPS: bad })).toThrow(/REVIEW_INVESTIGATION_STEPS|Invalid/);
   });
 
   it("does not scale the per-request transport timeout with REVIEW_TIMEOUT_SCALE", () => {

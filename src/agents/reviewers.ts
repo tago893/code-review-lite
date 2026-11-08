@@ -149,8 +149,8 @@ async function runOne(category: Category, deps: ReviewerDeps, gate: RateLimitGat
     );
     tally = { ...tallySuccess(tally, run.value), fellBack: run.modelUsed !== models[0] };
     const parsed = parseReviewerOutput(run.value.raw, category);
-    log.event("reviewer_done", { reviewer: category, model: run.modelUsed, retries: run.retries, findings: parsed.findings.length, rejected: parsed.rejected?.length ?? 0, parseError: parsed.error ?? null, durationMs: Date.now() - started });
-    return resultFor(category, parsed, tally);
+    log.event("reviewer_done", { reviewer: category, model: run.modelUsed, retries: run.retries, findings: parsed.findings.length, rejected: parsed.rejected?.length ?? 0, parseError: parsed.error ?? null, truncated: run.value.truncated === true, durationMs: Date.now() - started });
+    return resultFor(category, parsed, tally, run.value.truncated === true);
   } catch (error) {
     const failed = describeFailure(category, error);
     log.event("reviewer_failed", { reviewer: category, error: failed.error, failureClass: failed.failureClass, ...failureDetail(error), durationMs: Date.now() - started });
@@ -158,8 +158,8 @@ async function runOne(category: Category, deps: ReviewerDeps, gate: RateLimitGat
   }
 }
 
-function resultFor(category: Category, parsed: ParsedReviewerOutput, tally: Tally): OneResult {
-  const outcome: ReviewerOutcome = { reviewer: category, required: true, executed: true, parsed };
+function resultFor(category: Category, parsed: ParsedReviewerOutput, tally: Tally, truncated: boolean): OneResult {
+  const outcome: ReviewerOutcome = { reviewer: category, required: true, executed: true, parsed, ...(truncated ? { truncated } : {}) };
   const unusable = parsed.error !== undefined && parsed.findings.length === 0;
   const failed: FailedReviewer | undefined = unusable ? { reviewer: category, error: "unusable_output", failureClass: "output" } : undefined;
   return { findings: parsed.findings, outcome, ...(failed ? { failed } : {}), tally };

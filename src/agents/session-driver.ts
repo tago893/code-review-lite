@@ -39,7 +39,7 @@ export interface MessageLike {
 
 export interface SessionApi {
   create(): Promise<string>;
-  promptAsync(sessionId: string, input: { readonly model: string; readonly text: string }): Promise<void>;
+  promptAsync(sessionId: string, input: { readonly model: string; readonly text: string; readonly stepLimited: boolean }): Promise<void>;
   messages(sessionId: string): Promise<readonly MessageLike[]>;
   /** Sessions that are not idle. An idle session is absent from the result. */
   status(): Promise<Readonly<Record<string, SessionStatus>>>;
@@ -71,6 +71,12 @@ export interface DriveInput {
   readonly attemptId: string;
   readonly model: string;
   readonly prompt: string;
+  /**
+   * Most agent steps (model calls) this session may take. Set for reviewer Phase 1, which then runs under the capped
+   * "investigator" agent. Unset for the coordinator. OpenCode only asks the model to stop at the limit; the driver
+   * enforces it (see StepLimitExceeded).
+   */
+  readonly stepLimit?: number;
   readonly signal?: AbortSignal;
 }
 
@@ -81,6 +87,10 @@ export interface DriveResult {
   /** False when the provider reported no usage at all; the token counts are then not "zero", they are unknown. */
   readonly tokensKnown: boolean;
   readonly sessionId: string;
+  /** Model calls the session made. */
+  readonly steps: number;
+  /** The session used every step it was allowed. The investigation may have been cut short: it is not proof of completeness. */
+  readonly stepLimitReached: boolean;
 }
 
 const MAX_PATH_CHARS = 200;
@@ -104,7 +114,7 @@ export async function driveSession(api: SessionApi, input: DriveInput, opts: Dri
   let lastUsage: Usage = { input: 0, output: 0, known: false };
   try {
     signal?.throwIfAborted();
-    await api.promptAsync(sessionId, { model: input.model, text: input.prompt });
+    await api.promptAsync(sessionId, { model: input.model, text: input.prompt, stepLimited: input.stepLimit !== undefined });
     const promptedAt = now();
     const seenTools = new Set<string>();
     let lastRetryAttempt = 0;
@@ -131,6 +141,12 @@ export async function driveSession(api: SessionApi, input: DriveInput, opts: Dri
       const errored = messages.find((m) => m.info.role === "assistant" && m.info.error !== undefined && m.info.error !== null);
       if (errored) throw errored.info.error;
 
+      const steps = messages.filter((m) => m.info.role === "assistant");
+      if (input.stepLimit !== undefined && overranStepLimit(steps, input.stepLimit)) {
+        emit("investigation_steps", { sessionId, steps: steps.length, stepLimit: input.stepLimit, limitReached: true, outcome: "overrun" });
+        throw Object.assign(new Error("step limit exceeded"), { name: "StepLimitExceeded" });
+      }
+
       if (status?.type === "retry" && status.attempt !== lastRetryAttempt) {
         lastRetryAttempt = status.attempt;
         const delayMs = typeof status.next === "number" ? Math.max(0, status.next - now()) : undefined;
@@ -151,7 +167,9 @@ export async function driveSession(api: SessionApi, input: DriveInput, opts: Dri
         continue;
       }
       if (!assistants.every((m) => m.info.time?.completed !== undefined)) continue;
-      return { text: finalText(assistants), tokensIn: lastUsage.input, tokensOut: lastUsage.output, tokensKnown: lastUsage.known, sessionId };
+      const limitReached = input.stepLimit !== undefined && assistants.length >= input.stepLimit;
+      if (input.stepLimit !== undefined) emit("investigation_steps", { sessionId, steps: assistants.length, stepLimit: input.stepLimit, limitReached, outcome: "finished" });
+      return { text: finalText(assistants), tokensIn: lastUsage.input, tokensOut: lastUsage.output, tokensKnown: lastUsage.known, sessionId, steps: assistants.length, stepLimitReached: limitReached };
     }
   } catch (error) {
     failure = error;
@@ -195,6 +213,16 @@ function annotate(error: unknown, sessionId: string, usage: Usage): unknown {
   } catch {
     return error; // frozen: keep the original rather than lose the failure
   }
+}
+
+/**
+ * True when the model kept using tools past the limit: a further step began after the last allowed one, or the last
+ * allowed step itself asked for a tool. A compliant model writes text on its last step.
+ */
+function overranStepLimit(steps: readonly MessageLike[], limit: number): boolean {
+  if (steps.length > limit) return true;
+  const last = steps[limit - 1];
+  return last !== undefined && ((last.parts ?? []).some((p) => p.type === "tool") || last.info.finish === "tool-calls");
 }
 
 const isCompaction = (m: MessageLike): boolean =>

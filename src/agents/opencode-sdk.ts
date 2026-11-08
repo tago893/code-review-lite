@@ -10,6 +10,8 @@ import { driveSession, type DriverOptions, type MessageLike, type SessionApi, ty
 const SDK_MODULE = "@opencode-ai/sdk/v2"; // held in a variable so TypeScript does not require the package at build time
 const PROVIDER_ID = "groq";
 const PORT = 4096;
+/** The agent that reviewer investigations run under; it carries the step cap. The coordinator uses the default agent. */
+const INVESTIGATOR = "investigator";
 
 type Call<T> = Promise<{ data?: T }>;
 const THROW = { throwOnError: true } as const;
@@ -54,6 +56,7 @@ export async function launchOpenCode(options: LaunchOptions, processEnv: NodeJS.
     config: {
       provider: { [PROVIDER_ID]: { options: { baseURL: options.baseUrl, apiKey: "proxy-placeholder" } } },
       permission: options.permissions.permission,
+      agent: { [INVESTIGATOR]: { mode: "primary", description: "Bounded read-only code investigation", steps: options.lifecycle.maxInvestigationSteps } },
       compaction: { auto: false, prune: false },
       share: "disabled",
       autoupdate: false,
@@ -71,7 +74,7 @@ export async function launchOpenCode(options: LaunchOptions, processEnv: NodeJS.
   const sink = options.onTrace ?? (() => undefined);
 
   return {
-    explore: ({ model, prompt, attemptId, signal }) => driveSession(api, { attemptId, model, prompt, ...(signal ? { signal } : {}) }, driver, sink),
+    explore: ({ model, prompt, attemptId, stepLimited, signal }) => driveSession(api, { attemptId, model, prompt, ...(stepLimited ? { stepLimit: options.lifecycle.maxInvestigationSteps } : {}), ...(signal ? { signal } : {}) }, driver, sink),
     async close() {
       server.close();
     },
@@ -117,8 +120,8 @@ function sessionApi(client: SdkClient): SessionApi {
   const s = client.session;
   return {
     create: () => guarded(async () => (await s.create({ title: "review" }, THROW)).data.id),
-    promptAsync: (sessionID, { model, text }) =>
-      guarded(async () => { await s.promptAsync({ sessionID, model: { providerID: PROVIDER_ID, modelID: model }, parts: [{ type: "text", text }] }, THROW); }),
+    promptAsync: (sessionID, { model, text, stepLimited }) =>
+      guarded(async () => { await s.promptAsync({ sessionID, ...(stepLimited ? { agent: INVESTIGATOR } : {}), model: { providerID: PROVIDER_ID, modelID: model }, parts: [{ type: "text", text }] }, THROW); }),
     messages: (sessionID) => guarded(async () => (await s.messages({ sessionID }, THROW)).data ?? []),
     status: () => guarded(async () => (await s.status({}, THROW)).data ?? {}),
     abort: (sessionID) => guarded(async () => { await s.abort({ sessionID }, THROW); }),

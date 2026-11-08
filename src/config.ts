@@ -35,6 +35,8 @@ export interface SessionLifecycle {
   /** OpenCode retries a failing provider call by itself; past this many retries the attempt is ended. */
   readonly maxProviderRetries: number;
   readonly maxPollFailures: number;
+  /** Most agent steps (model calls) one reviewer investigation may take. See REVIEW_INVESTIGATION_STEPS. */
+  readonly maxInvestigationSteps: number;
 }
 
 /** Agent-side config. It never holds the real Groq key: `groqBaseUrl` points at the credential proxy. */
@@ -101,6 +103,11 @@ function timeoutScale(value: string | undefined): number {
 }
 
 /** REVIEW_SESSION_RETRIES: how many times OpenCode may retry a failing provider call within one attempt. 1 to 20, default 5. */
+function investigationSteps(value: string | undefined): number {
+  if (value === undefined || value.trim() === "") return 10;
+  return parseOrThrow(z.string().regex(/^\d+$/).transform(Number).refine((n) => n >= 1 && n <= 50, "REVIEW_INVESTIGATION_STEPS must be an integer from 1 to 50"), value.trim());
+}
+
 function sessionRetries(value: string | undefined): number {
   if (value === undefined || value.trim() === "") return 5;
   return parseOrThrow(z.string().regex(/^\d+$/).transform(Number).refine((n) => n >= 1 && n <= 20, "REVIEW_SESSION_RETRIES must be an integer from 1 to 20"), value.trim());
@@ -133,6 +140,7 @@ export function loadConfig(env: Env): Config {
     session: Object.freeze({
       pollMs: 1000, requestTimeoutMs: 30_000, startGraceMs: 30_000, cleanupWaitMs: 10_000,
       maxProviderRetries: sessionRetries(env["REVIEW_SESSION_RETRIES"]), maxPollFailures: 2,
+      maxInvestigationSteps: investigationSteps(env["REVIEW_INVESTIGATION_STEPS"]),
     }),
   });
 }

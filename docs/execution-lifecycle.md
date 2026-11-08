@@ -58,9 +58,36 @@ was about to wait. The outer `runWithFallback` budget (2 retries per model, then
 - **Known limitation: tool output size cannot be bounded through OpenCode 1.19.5 configuration.** The SDK has
   `tool_output.max_lines` / `max_bytes`, but they do not apply to `read` or `grep`: measured with a 6,000-byte limit,
   `read` still returned its own hard cap (50 KB / 2,000 lines, "use offset=N to continue") and grep was unchanged.
-  One large `read` can therefore push a request past a free-tier limit (8,000 tokens per minute is roughly 28 KB).
+  One large `read` can therefore push a request past the account's limit. A single probe measured `x-ratelimit-limit-tokens`
+= 8000 (tokens per minute) for `openai/gpt-oss-20b`. The bytes-to-tokens ratio of OpenCode requests has not been
+measured, so any byte figure for that limit is an estimate.
   Bounding it would need a custom read tool or a prompt change, which are outside this hardening pass.
   What CRA does instead: it logs every tool call's output size as it finishes, and an overflow now fails visibly.
+
+## Investigation step cap
+
+Reviewer Phase 1 sessions run under a dedicated OpenCode agent, `investigator`, configured with the supported
+`steps` setting (`REVIEW_INVESTIGATION_STEPS`, default 10, range 1-50). The coordinator and Phase 2 / judge / verifier
+calls do not use it. The same read-only permissions apply, so the investigation can still read, grep and glob unchanged
+files.
+
+What the cap does, as measured against OpenCode 1.19.5 with a scripted model:
+
+- On the last allowed step OpenCode appends an instruction ("respond with text ONLY") **but still offers the tools**
+  (`tool_choice: auto`). The cap is therefore a request to the model, not a mechanism. A model that obeys writes its
+  notes on that step; a model that ignores it simply keeps calling tools, and OpenCode keeps going (one scripted run
+  made 695 requests in 40 s).
+- CRA enforces the cap itself. If a step begins past the limit, or the last allowed step asks for a tool, the driver
+  aborts the session and fails the attempt as `StepLimitExceeded` (`step_limit`): non-retryable, so the same
+  investigation is not re-run on a retry or the fallback model. The driver polls once a second, so a model can overshoot
+  by about one poll interval (5 requests for a limit of 3 in the integration test, whose scripted model answers in
+  0.6 s; a real model is slower per step).
+- **A capped investigation is never a clean review.** A session that used all its steps, even if it ended with text,
+  marks the reviewer `truncated`; the review is then `incomplete` (`investigation_truncated`, verdict `not_determined`,
+  exit 2), with or without findings. Findings it did produce are kept and shown as partial. The cost of this rule is that
+  an investigation which happened to finish naturally on exactly its last step is also reported as truncated.
+- Telemetry: `investigation_steps` {`steps`, `stepLimit`, `limitReached`, `outcome`: `finished` | `overrun`}; the
+  `reviewer_done` event carries `truncated`.
 
 ## What is logged (all in run.jsonl; nothing here contains source text)
 
