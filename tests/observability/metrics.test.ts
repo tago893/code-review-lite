@@ -65,3 +65,27 @@ describe("createMetrics", () => {
     expect(JSON.stringify(m.snapshot())).not.toContain("SECRET TEXT");
   });
 });
+
+describe("token usage that is partial or unknown", () => {
+  it("starts with nothing unreported and an exact figure", () => {
+    expect(createMetrics().snapshot().usage).toEqual({ unreportedRuns: 0, lowerBound: false });
+  });
+
+  it("marks the total a lower bound when usage came from work that was cut short", () => {
+    const m = createMetrics().recordTokens("security", 100, 5, false);
+    expect(m.snapshot().tokens).toMatchObject({ input: 100, output: 5 });
+    expect(m.snapshot().usage).toEqual({ unreportedRuns: 0, lowerBound: true });
+  });
+
+  it("counts runs that reported nothing separately instead of adding zeros", () => {
+    const m = createMetrics().recordTokens("a", 10, 1).recordUnreportedTokens("b").recordUnreportedTokens("b");
+    expect(m.snapshot().tokens).toMatchObject({ input: 10, output: 1 });
+    expect(m.snapshot().usage).toEqual({ unreportedRuns: 2, lowerBound: true });
+  });
+
+  it("is immutable", () => {
+    const before = createMetrics();
+    before.recordUnreportedTokens("x");
+    expect(before.snapshot().usage.unreportedRuns).toBe(0);
+  });
+});

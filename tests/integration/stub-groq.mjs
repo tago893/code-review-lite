@@ -8,6 +8,10 @@
 //   report  - turn 1 reads src/users.ts; then writes notes naming the seeded bug; Phase 2/judge/verifier get fixed JSON
 //   error   - always HTTP 500
 //   tools   - turn 1 asks for read of src/users.ts only (a benign tool call), then "No findings."
+//   overflow - turn 1 reads src/users.ts; every later request is answered with a Groq-shaped HTTP 413 (a deterministic
+//             "request too large"). A request that looks like OpenCode's compaction call is logged as kind "compaction".
+//   ratelimit      - always HTTP 429 with retry-after: 1
+//   ratelimit_slow - always HTTP 429 with retry-after: 6
 // The stub checks that the proxy replaced the placeholder with STUB_EXPECT_KEY and prints whether it did.
 import http from "node:http";
 
@@ -71,6 +75,15 @@ function respond(body, res) {
   } else if (MODE === "attack") {
     kind = hasToolResults ? "final" : "attack";
     parts = hasToolResults ? textTurn("No findings.") : toolTurn(ATTACKS);
+  } else if (MODE === "overflow") {
+    const compaction = system.includes("context summarization");
+    kind = compaction ? "compaction" : hasToolResults ? "overflow_413" : "read";
+    if (kind === "overflow_413") {
+      res.writeHead(413, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "Request too large for model `openai/gpt-oss-120b` on tokens per minute (TPM): Limit 8000, Requested 11111, please reduce your message size and try again.", type: "tokens", code: "rate_limit_exceeded" } }));
+      return { kind, stream: wantsStream, toolResults: hasToolResults, answered: 413 };
+    }
+    parts = compaction ? textTurn("summary") : toolTurn([["read", { filePath: "/repo/src/users.ts" }]]);
   } else if (MODE === "tools" || MODE === "report") {
     kind = hasToolResults ? "final" : "read";
     parts = hasToolResults ? textTurn(MODE === "report" ? NOTES : "No findings.") : toolTurn([["read", { filePath: "/repo/src/users.ts" }]]);
@@ -100,6 +113,13 @@ http
         log({ event: "request", path: req.url, keyInjected, answered: 500 });
         res.writeHead(500, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { message: "scripted failure", type: "server_error" } }));
+        return;
+      }
+      if (MODE === "ratelimit" || MODE === "ratelimit_slow") {
+        const wait = MODE === "ratelimit" ? "1" : "6";
+        log({ event: "request", path: req.url, keyInjected, answered: 429 });
+        res.writeHead(429, { "content-type": "application/json", "retry-after": wait });
+        res.end(JSON.stringify({ error: { message: "Rate limit reached for model `openai/gpt-oss-20b` on tokens per minute (TPM): Limit 8000, Used 7900, Requested 1000. Please try again in " + wait + "s.", type: "tokens", code: "rate_limit_exceeded" } }));
         return;
       }
       if (req.method !== "POST") {

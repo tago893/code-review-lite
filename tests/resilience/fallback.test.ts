@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ModelsExhaustedError, runWithFallback } from "../../src/resilience/fallback.js";
+import { ModelsExhaustedError, runWithFallback, type AttemptEvent } from "../../src/resilience/fallback.js";
 
 const http = (status: number, extra: Record<string, unknown> = {}): Error =>
   Object.assign(new Error(`HTTP ${status}`), { status, ...extra });
@@ -96,5 +96,90 @@ describe("runWithFallback", () => {
     expect(calls).toEqual(["a"]);
     const empty = await settle(runWithFallback([], async () => "x", { timeoutMs: 1000 }));
     expect(empty.status).toBe("rejected");
+  });
+});
+
+describe("runWithFallback: abandoned attempts", () => {
+  it("waits for a timed-out attempt to finish its cleanup before it rejects", async () => {
+    const order: string[] = [];
+    const attempt = (_m: string, signal: AbortSignal): Promise<string> =>
+      new Promise<string>((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          // stands in for aborting and deleting the OpenCode session, which takes a moment
+          setTimeout(() => { order.push("cleanup finished"); reject(Object.assign(new Error("aborted"), { name: "AbortError" })); }, 300);
+        });
+      });
+    const result = await settle(runWithFallback(["m"], attempt, { timeoutMs: 500, abortGraceMs: 5000 }));
+    order.push("run rejected");
+    expect(order).toEqual(["cleanup finished", "run rejected"]);
+    expect((result as PromiseRejectedResult).reason).toMatchObject({ name: "TimeoutError" });
+  });
+
+  it("still rejects after the grace period if the attempt never settles", async () => {
+    const started = Date.now();
+    const result = await settle(runWithFallback(["m"], () => new Promise<string>(() => undefined), { timeoutMs: 500, abortGraceMs: 2000 }));
+    expect(result.status).toBe("rejected");
+    expect(Date.now() - started).toBe(2500);
+  });
+
+  it("treats a success that arrives after the deadline as a timeout", async () => {
+    const attempt = (): Promise<string> => new Promise<string>((resolve) => setTimeout(() => resolve("late"), 700));
+    const result = await settle(runWithFallback(["m"], attempt, { timeoutMs: 500, abortGraceMs: 5000 }));
+    expect((result as PromiseRejectedResult).reason).toMatchObject({ name: "TimeoutError" });
+  });
+
+  it("carries known usage from the abandoned attempt onto the timeout error", async () => {
+    const attempt = (_m: string, signal: AbortSignal): Promise<string> =>
+      new Promise<string>((_r, reject) => signal.addEventListener("abort", () => reject(Object.assign(new Error("x"), { name: "AbortError", usage: { input: 900, output: 40, complete: false } }))));
+    const result = await settle(runWithFallback(["m"], attempt, { timeoutMs: 500 }));
+    expect((result as PromiseRejectedResult).reason).toMatchObject({ name: "TimeoutError", usage: { input: 900, output: 40, complete: false } });
+  });
+
+  it("never starts a replacement attempt while the previous one is still running", async () => {
+    let running = 0; let maxRunning = 0;
+    let n = 0;
+    const attempt = async (): Promise<string> => {
+      running++; maxRunning = Math.max(maxRunning, running);
+      try { await new Promise((r) => setTimeout(r, 50)); if (n++ < 3) throw http(503); return "ok"; } finally { running--; }
+    };
+    await settle(runWithFallback(["a", "b"], attempt, { timeoutMs: 1000 }));
+    expect(maxRunning).toBe(1);
+  });
+});
+
+describe("runWithFallback: decisions and usage are observable", () => {
+  it("reports every attempt start and failure with its decision, delay and known usage", async () => {
+    const events: AttemptEvent[] = [];
+    let n = 0;
+    const attempt = async (): Promise<string> => {
+      if (n++ < 2) throw http(429, { headers: { "retry-after": "3" }, usage: { input: 50, output: 1, complete: true } });
+      return "ok";
+    };
+    await settle(runWithFallback(["a", "b"], attempt, { timeoutMs: 1000, maxRetries: 2, onEvent: (e) => events.push(e) }));
+    expect(events).toEqual([
+      { type: "start", model: "a", tryNo: 0 },
+      { type: "failed", model: "a", tryNo: 0, kind: "rate_limit", decision: "retry_same_model", delayMs: 3000, usage: { input: 50, output: 1, complete: true } },
+      { type: "start", model: "a", tryNo: 1 },
+      { type: "failed", model: "a", tryNo: 1, kind: "rate_limit", decision: "retry_same_model", delayMs: 3000, usage: { input: 50, output: 1, complete: true } },
+      { type: "start", model: "a", tryNo: 2 },
+      { type: "succeeded", model: "a", tryNo: 2 },
+    ]);
+  });
+
+  it("reports the fallback and exhaustion decisions, and records usage per failed attempt", async () => {
+    const events: AttemptEvent[] = [];
+    const result = await settle(runWithFallback(["a", "b"], async () => { throw http(503, { usage: { input: 10, output: 0, complete: false } }); }, { timeoutMs: 1000, maxRetries: 0, onEvent: (e) => events.push(e) }));
+    expect(events.filter((e) => e.type === "failed").map((e) => (e as { decision: string }).decision)).toEqual(["fallback_model", "exhausted"]);
+    expect(((result as PromiseRejectedResult).reason as ModelsExhaustedError).attempts).toEqual([
+      { model: "a", kind: "server", usage: { input: 10, output: 0, complete: false } },
+      { model: "b", kind: "server", usage: { input: 10, output: 0, complete: false } },
+    ]);
+  });
+
+  it("reports a non-retryable failure as ending the run, and never reports error text", async () => {
+    const events: AttemptEvent[] = [];
+    await settle(runWithFallback(["a", "b"], async () => { throw http(413, { message: "SECRET-BODY" }); }, { timeoutMs: 1000, onEvent: (e) => events.push(e) }));
+    expect(events).toEqual([{ type: "start", model: "a", tryNo: 0 }, { type: "failed", model: "a", tryNo: 0, kind: "context_overflow", decision: "stop_not_retryable" }]);
+    expect(JSON.stringify(events)).not.toContain("SECRET-BODY");
   });
 });

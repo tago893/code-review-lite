@@ -39,7 +39,7 @@ export async function review(cmd: Review, env: NodeJS.ProcessEnv, write: (text: 
     const notes = only === undefined ? [] : [`restricted run: only ${context.plan.agents.join(", ")} executed (REVIEW_AGENTS); this is not a full review`];
     const log = createLogger((line) => appendFileSync(cmd.log, `${line}\n`));
     const launcher = (options: Parameters<typeof launchOpenCode>[0]): ReturnType<typeof launchOpenCode> => launchOpenCode(options, env);
-    const sessions = createSessionProvider({ config, launcher, env, onToolCall: (call) => log.event("tool_call", call) });
+    const sessions = createSessionProvider({ config, launcher, env, onTrace: (event) => log.event(event.name, event.data) });
     const runner = createOpenCodeRunner({ config, launcher, sessions, env });
     const judgeStructured = createStructuredCall(config.groqBaseUrl, undefined, COORDINATOR_SCHEMA, "judgments");
     const verifierStructured = createStructuredCall(config.groqBaseUrl, undefined, VERIFIER_SCHEMA, "verdict");

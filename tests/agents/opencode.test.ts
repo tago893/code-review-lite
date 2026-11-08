@@ -39,7 +39,7 @@ function recorder(notes: string, content = '{"findings":[]}'): Recorder {
     launcher: async (options) => {
       r.launches.push(options);
       const session: ExploreSession = {
-        explore: async (input) => { r.explores.push(input); return { text: notes, tokensIn: 100, tokensOut: 10 }; },
+        explore: async (input) => { r.explores.push(input); return { text: notes, tokensIn: 100, tokensOut: 10, tokensKnown: true }; },
         close: async () => undefined,
       };
       return session;
@@ -65,7 +65,7 @@ describe("createOpenCodeRunner: two-phase flow", () => {
     expect(r.structured[0]?.system).toContain("PHASE TWO RULES");
     expect(r.structured[0]?.user).toBe("Path: src/a.ts\nLine: 3\nCode: x");
     expect(r.structured[0]?.user).not.toContain("diff: src/a.ts changed");
-    expect(result).toEqual({ raw: '{"findings":[]}', tokensIn: 140, tokensOut: 15 });
+    expect(result).toEqual({ raw: '{"findings":[]}', tokensIn: 140, tokensOut: 15, tokensKnown: true });
   });
 
   it("skips Phase 2 for an explicit 'No findings.' and returns a valid empty list", async () => {
@@ -191,7 +191,7 @@ describe("createStructuredCall", () => {
       return ok({ choices: [{ message: { content: '{"findings":[]}' } }], usage: { prompt_tokens: 12, completion_tokens: 3 } });
     };
     const result = await createStructuredCall("http://proxy:8080/openai/v1/", fetchFn)({ model: "m", system: "s", user: "u" });
-    expect(result).toEqual({ content: '{"findings":[]}', tokensIn: 12, tokensOut: 3 });
+    expect(result).toEqual({ content: '{"findings":[]}', tokensIn: 12, tokensOut: 3, tokensKnown: true });
     expect(seen?.url).toBe("http://proxy:8080/openai/v1/chat/completions");
     expect(seen?.headers["authorization"]).toBe("Bearer proxy-placeholder");
     expect(seen?.body).not.toHaveProperty("tools");
@@ -218,5 +218,30 @@ describe("createStructuredCall", () => {
       expect(error).toBeInstanceOf(Error);
       expect(error.message).not.toContain(secret);
     }
+  });
+});
+
+describe("createOpenCodeRunner: attempts and usage", () => {
+  it("passes the attempt id to the explore session, defaulting to the category", async () => {
+    const r = recorder("No findings.");
+    await runner(r).run({ ...req, attemptId: "security#3" });
+    expect(r.explores[0]).toMatchObject({ attemptId: "security#3" });
+    const r2 = recorder("No findings.");
+    await runner(r2).run(req);
+    expect(r2.explores[0]).toMatchObject({ attemptId: "security#1" });
+  });
+
+  it("reports usage as unknown when Phase 1 reported none, even for a clean no-findings result", async () => {
+    const r = recorder("No findings.");
+    const unknown = { ...r, launcher: async (o: LaunchOptions) => ({ ...(await r.launcher(o)), explore: async () => ({ text: "No findings.", tokensIn: 0, tokensOut: 0, tokensKnown: false }) }) };
+    const result = await createOpenCodeRunner({ config, launcher: unknown.launcher, structured: r.call, env: { PATH: "/usr/bin" } }).run(req);
+    expect(result).toMatchObject({ tokensKnown: false });
+  });
+
+  it("keeps the tokens Phase 1 already spent when Phase 2 fails", async () => {
+    const r = recorder("Path: src/a.ts\nLine: 3\nCode: x");
+    const failing: StructuredCall = async () => { throw Object.assign(new Error("x"), { status: 503 }); };
+    const error = await createOpenCodeRunner({ config, launcher: r.launcher, structured: failing, env: { PATH: "/usr/bin" } }).run(req).catch((e: unknown) => e);
+    expect(error).toMatchObject({ usage: { input: 100, output: 10, complete: false } });
   });
 });

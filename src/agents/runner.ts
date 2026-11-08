@@ -13,6 +13,8 @@ export interface ReviewerRequest {
   readonly repoRoot: string;
   /** Aborted when the attempt times out. */
   readonly signal?: AbortSignal;
+  /** Identifies this attempt in logs, e.g. "code_quality#2". */
+  readonly attemptId?: string;
 }
 
 export interface RunnerResult {
@@ -20,6 +22,8 @@ export interface RunnerResult {
   readonly raw: string;
   readonly tokensIn: number;
   readonly tokensOut: number;
+  /** False when the provider reported no usage, so the counts above are not real zeros. */
+  readonly tokensKnown?: boolean;
 }
 
 export interface ReviewerRunner {

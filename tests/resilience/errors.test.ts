@@ -39,9 +39,25 @@ describe("classifyError", () => {
     expect(classifyError({ cause: { status: 429 } })).toMatchObject({ kind: "rate_limit" });
   });
 
-  it("treats transient network failures as retryable server errors", () => {
-    expect(classifyError(Object.assign(new Error("x"), { code: "ECONNRESET" }))).toMatchObject({ retryable: true, kind: "server" });
-    expect(classifyError(new TypeError("fetch failed"))).toMatchObject({ retryable: true, kind: "server" });
+  // A transport failure (our own HTTP call to the local OpenCode server failed) is not an upstream 5xx, and the
+  // two must stay distinguishable in logs and in the retry record.
+  it("classifies transient network failures as retryable transport errors, not server errors", () => {
+    expect(classifyError(Object.assign(new Error("x"), { code: "ECONNRESET" }))).toMatchObject({ retryable: true, kind: "transport" });
+    expect(classifyError(new TypeError("fetch failed"))).toMatchObject({ retryable: true, kind: "transport" });
+  });
+
+  it("classifies undici timeouts, including by cause, as transport", () => {
+    expect(classifyError(Object.assign(new Error("x"), { code: "UND_ERR_HEADERS_TIMEOUT" }))).toMatchObject({ retryable: true, kind: "transport" });
+    expect(classifyError(Object.assign(new TypeError("fetch failed"), { cause: { code: "UND_ERR_BODY_TIMEOUT" } }))).toMatchObject({ retryable: true, kind: "transport" });
+    expect(classifyError(Object.assign(new Error("request timed out"), { name: "TransportTimeoutError" }))).toMatchObject({ retryable: true, kind: "transport" });
+  });
+
+  it("keeps an HTTP 5xx as a server error even when a transport word appears in the message", () => {
+    expect(classifyError(http(502, { message: "fetch failed upstream" }))).toMatchObject({ retryable: true, kind: "server" });
+  });
+
+  it("treats OpenCode's ContextOverflowError as non-retryable context overflow whatever its message says", () => {
+    expect(classifyError({ name: "ContextOverflowError", data: { message: "Input exceeds the limit" } })).toEqual({ retryable: false, kind: "context_overflow" });
   });
 
   it("treats everything else as unknown and non-retryable, and never throws", () => {

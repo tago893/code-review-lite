@@ -5,7 +5,8 @@ import type { ReviewerOutcome } from "../completion.js";
 import type { Logger } from "../observability/log.js";
 import type { Metrics } from "../observability/metrics.js";
 import { classifyError } from "../resilience/errors.js";
-import { ModelsExhaustedError, runWithFallback } from "../resilience/fallback.js";
+import { ModelsExhaustedError, runWithFallback, type AttemptEvent } from "../resilience/fallback.js";
+import type { KnownUsage } from "./scrub.js";
 import type { Category, Finding } from "../types.js";
 import { ReviewerSecurityError, type ReviewerRunner } from "./runner.js";
 
@@ -46,10 +47,39 @@ interface OneResult {
   readonly findings: readonly Finding[];
   readonly failed?: FailedReviewer;
   readonly outcome: ReviewerOutcome;
-  readonly tokensIn: number;
-  readonly tokensOut: number;
+  /** Everything this reviewer spent, including attempts that failed. */
+  readonly tally: Tally;
+}
+
+/** Token usage and retry accounting for one reviewer across all of its attempts. Immutable: each step returns a new one. */
+interface Tally {
+  readonly input: number;
+  readonly output: number;
+  /** False when some of the usage is from work that was cut short, so the figures are a lower bound. */
+  readonly complete: boolean;
+  /** Attempts that used the provider but reported no usage: unknown, not zero. */
+  readonly unreported: number;
   readonly retries: number;
   readonly fellBack: boolean;
+}
+
+const EMPTY_TALLY: Tally = Object.freeze({ input: 0, output: 0, complete: true, unreported: 0, retries: 0, fellBack: false });
+
+function tallyFailure(t: Tally, usage: KnownUsage | undefined, retried: boolean, fellBack: boolean): Tally {
+  return {
+    ...t,
+    input: t.input + (usage?.input ?? 0), output: t.output + (usage?.output ?? 0),
+    complete: usage === undefined ? t.complete : t.complete && usage.complete, // silent attempts are counted in unreported
+    unreported: t.unreported + (usage === undefined ? 1 : 0),
+    retries: t.retries + (retried ? 1 : 0),
+    fellBack: t.fellBack || fellBack,
+  };
+}
+
+function tallySuccess(t: Tally, result: { tokensIn: number; tokensOut: number; tokensKnown?: boolean }): Tally {
+  return result.tokensKnown === false
+    ? { ...t, unreported: t.unreported + 1 }
+    : { ...t, input: t.input + result.tokensIn, output: t.output + result.tokensOut };
 }
 
 /**
@@ -79,6 +109,22 @@ async function runOne(category: Category, deps: ReviewerDeps, gate: RateLimitGat
   const started = Date.now();
   log.event("reviewer_start", { reviewer: category, models });
 
+  let tally = EMPTY_TALLY;
+  let attemptNo = 0;
+  let attemptId = "";
+  const onEvent = (event: AttemptEvent): void => {
+    if (event.type === "start") {
+      attemptId = `${category}#${++attemptNo}`;
+      log.event("attempt_start", { reviewer: category, attemptId, model: event.model, tryNo: event.tryNo });
+    } else if (event.type === "succeeded") {
+      log.event("attempt_succeeded", { reviewer: category, attemptId, model: event.model, tryNo: event.tryNo });
+    } else {
+      const { type: _type, ...detail } = event;
+      log.event("attempt_failed", { reviewer: category, attemptId, ...detail });
+      tally = tallyFailure(tally, event.usage, event.decision !== "stop_not_retryable", event.model !== models[0]);
+    }
+  };
+
   try {
     const run = await runWithFallback(
       models,
@@ -86,7 +132,7 @@ async function runOne(category: Category, deps: ReviewerDeps, gate: RateLimitGat
         await gate.wait();
         try {
           return await runner.run({
-            category, model, signal,
+            category, model, signal, attemptId,
             promptPath: join(paths.promptDir, `${category}.md`),
             sharedContextPath: paths.sharedContextPath,
             patchDir: paths.patchDir,
@@ -95,27 +141,28 @@ async function runOne(category: Category, deps: ReviewerDeps, gate: RateLimitGat
         } catch (error) {
           const kind = classifyError(error);
           if (kind.kind === "rate_limit") gate.note(kind.retryAfterMs ?? 0);
-          throw error;
+          // Refusing unsafe input happens before any model is contacted: that is a known zero, not an unknown.
+          throw error instanceof ReviewerSecurityError ? Object.assign(error, { usage: { input: 0, output: 0, complete: true } }) : error;
         }
       },
-      { timeoutMs, maxRetries: config.maxRetries },
+      { timeoutMs, maxRetries: config.maxRetries, abortGraceMs: config.timeouts.abortGraceMs, onEvent },
     );
+    tally = { ...tallySuccess(tally, run.value), fellBack: run.modelUsed !== models[0] };
     const parsed = parseReviewerOutput(run.value.raw, category);
-    const common = { tokensIn: run.value.tokensIn, tokensOut: run.value.tokensOut, retries: run.retries, fellBack: run.modelUsed !== models[0] };
     log.event("reviewer_done", { reviewer: category, model: run.modelUsed, retries: run.retries, findings: parsed.findings.length, rejected: parsed.rejected?.length ?? 0, parseError: parsed.error ?? null, durationMs: Date.now() - started });
-    return resultFor(category, parsed, common);
+    return resultFor(category, parsed, tally);
   } catch (error) {
     const failed = describeFailure(category, error);
     log.event("reviewer_failed", { reviewer: category, error: failed.error, failureClass: failed.failureClass, ...failureDetail(error), durationMs: Date.now() - started });
-    return { findings: [], failed, outcome: { reviewer: category, required: true, executed: false }, tokensIn: 0, tokensOut: 0, retries: 0, fellBack: false };
+    return { findings: [], failed, outcome: { reviewer: category, required: true, executed: false }, tally };
   }
 }
 
-function resultFor(category: Category, parsed: ParsedReviewerOutput, common: Pick<OneResult, "tokensIn" | "tokensOut" | "retries" | "fellBack">): OneResult {
+function resultFor(category: Category, parsed: ParsedReviewerOutput, tally: Tally): OneResult {
   const outcome: ReviewerOutcome = { reviewer: category, required: true, executed: true, parsed };
   const unusable = parsed.error !== undefined && parsed.findings.length === 0;
   const failed: FailedReviewer | undefined = unusable ? { reviewer: category, error: "unusable_output", failureClass: "output" } : undefined;
-  return { findings: parsed.findings, outcome, ...(failed ? { failed } : {}), ...common };
+  return { findings: parsed.findings, outcome, ...(failed ? { failed } : {}), tally };
 }
 
 /** Fixed-vocabulary detail for the log: error kinds per attempt, or the SDK error name. Never message text. */
@@ -133,9 +180,11 @@ function describeFailure(reviewer: string, error: unknown): FailedReviewer {
 }
 
 function recordMetrics(metrics: Metrics, category: string, r: OneResult): Metrics {
-  let next = metrics.recordTokens(category, r.tokensIn, r.tokensOut);
-  for (let i = 0; i < r.retries; i++) next = next.recordRetry();
-  return r.fellBack ? next.recordFallback() : next;
+  const t = r.tally;
+  let next = t.input + t.output > 0 || !t.complete ? metrics.recordTokens(category, t.input, t.output, t.complete) : metrics;
+  for (let i = 0; i < t.unreported; i++) next = next.recordUnreportedTokens(category);
+  for (let i = 0; i < t.retries; i++) next = next.recordRetry();
+  return t.fellBack ? next.recordFallback() : next;
 }
 
 // --- shared rate-limit gate ---------------------------------------------------------------------------------

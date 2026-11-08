@@ -198,3 +198,59 @@ describe("createRateLimitGate", () => {
     expect(capped).toBe(true);
   });
 });
+
+describe("runReviewers: attempt tracing and usage", () => {
+  const events = () => lines.map((l) => JSON.parse(l) as Record<string, unknown>);
+
+  it("gives every attempt an id, passes it to the runner and logs start, failure decisions and success", async () => {
+    vi.useFakeTimers();
+    try {
+      const ids: (string | undefined)[] = [];
+      let n = 0;
+      const runner: ReviewerRunner = { run: async (r) => { ids.push(r.attemptId); if (n++ === 0) throw http(429, { headers: { "retry-after": "2" }, usage: { input: 40, output: 0, complete: false } }); return out(); } };
+      const pending = run(["security"], runner);
+      await vi.runAllTimersAsync();
+      await pending;
+      expect(ids).toEqual(["security#1", "security#2"]);
+      const log = events();
+      expect(log.filter((e) => e["event"] === "attempt_start").map((e) => e["attemptId"])).toEqual(["security#1", "security#2"]);
+      expect(log.find((e) => e["event"] === "attempt_failed")).toMatchObject({ attemptId: "security#1", reviewer: "security", model: "small", kind: "rate_limit", decision: "retry_same_model", delayMs: 2000, usage: { input: 40, output: 0, complete: false } });
+      expect(log.find((e) => e["event"] === "attempt_succeeded")).toMatchObject({ attemptId: "security#2" });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("keeps the tokens that failed attempts are known to have used, as a lower bound, and counts silent ones as unreported", async () => {
+    vi.useFakeTimers();
+    try {
+      let n = 0;
+      const runner: ReviewerRunner = { run: async () => { n++; throw http(429, n === 1 ? { usage: { input: 700, output: 20, complete: false } } : {}); } };
+      const pending = run(["security"], runner, cfg({ maxRetries: 0 }));
+      await vi.runAllTimersAsync();
+      const result = await pending;
+      expect(result.failed).toEqual([{ reviewer: "security", error: "models_exhausted", failureClass: "model" }]);
+      const snap = result.metrics?.snapshot();
+      expect(snap?.tokens).toMatchObject({ input: 700, output: 20 });
+      expect(snap?.usage).toEqual({ unreportedRuns: 1, lowerBound: true });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("keeps usage from a timed-out or overflowed attempt (a single non-retryable failure)", async () => {
+    const runner: ReviewerRunner = { run: async () => { throw Object.assign(new Error("x"), { name: "ProviderError", status: 413, usage: { input: 900, output: 3, complete: false } }); } };
+    const result = await run(["security"], runner);
+    expect(result.failed[0]).toMatchObject({ error: "model_context_overflow" });
+    expect(result.metrics?.snapshot().tokens).toMatchObject({ input: 900, output: 3 });
+  });
+
+  it("records unknown usage on success as unreported, not as zero", async () => {
+    const runner: ReviewerRunner = { run: async () => ({ raw: "[]", tokensIn: 0, tokensOut: 0, tokensKnown: false }) };
+    const result = await run(["security"], runner);
+    expect(result.metrics?.snapshot().usage).toEqual({ unreportedRuns: 1, lowerBound: true });
+  });
+
+  it("logs a failure with no usage at all as unknown, never as a zero count", async () => {
+    const runner: ReviewerRunner = { run: async () => { throw new Error("boom"); } };
+    const result = await run(["security"], runner);
+    expect(result.metrics?.snapshot().usage.unreportedRuns).toBe(1);
+    expect(JSON.stringify(events().filter((e) => e["event"] === "attempt_failed"))).not.toContain('"input":0');
+  });
+});

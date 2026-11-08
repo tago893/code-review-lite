@@ -70,6 +70,50 @@ for s in "${scenarios[@]}"; do
       grep '"has_response_format":true' "$d/requests.jsonl" | grep -q '"has_tools":true' && fail "a structured request carried tools" || pass "structured (Phase 2 / judge / verifier) requests carried no tools"
       grep -q '"has_response_format":true' "$d/requests.jsonl" && pass "Phase 2 structured request was made" || fail "no structured request seen"
       ;;
+    overflow)
+      # A deterministic "request too large" (HTTP 413) after the first tool call. It must fail visibly and once, with the
+      # evidence preserved, and must NOT be silently compacted and carried on.
+      make_repo "$work/repo-overflow"
+      run_case overflow overflow "$work/repo-overflow" REVIEW_AGENTS=code_quality
+      d="$work/overflow"
+      echo "  exit=$(rc overflow)"; sed -n '1,14p' "$d/report.md" | sed 's/^/    /'
+      [ "$(rc overflow)" = 2 ] && pass "an oversized request ends the review incomplete (exit 2)" || fail "exit code $(rc overflow), expected 2"
+      has "$d/report.md" "Verdict: not_determined" && pass "verdict is not_determined, never approved" || fail "wrong verdict"
+      has "$d/report.md" "model_context_overflow" && pass "failure is named context overflow" || fail "failure not named"
+      n=$(grep -c '"answered":413' "$d/stub.log" 2>/dev/null); [ "$n" = 1 ] && pass "the oversized request was sent exactly once, not repeated unchanged" || fail "oversized request sent $n times"
+      has "$d/stub.log" '"kind":"compaction"' && fail "OpenCode compacted the investigation" || pass "no compaction request was made (automatic compaction is off)"
+      grep '"event":"tool_call"' "$d/run.jsonl" | grep -q '"tool":"read"' && pass "the tool call made before the failure was logged" || fail "tool call lost with the failed attempt"
+      grep '"event":"attempt_failed"' "$d/run.jsonl" | grep -q '"kind":"context_overflow".*"decision":"stop_not_retryable"' && pass "decision logged: context_overflow, stop_not_retryable" || fail "attempt decision not logged"
+      grep '"event":"session_cleanup"' "$d/run.jsonl" | grep -q '"abort":"ok".*"idle":true.*"delete":"ok"' && pass "the failed session was cancelled, confirmed idle and deleted" || fail "session cleanup not confirmed"
+      has "$d/report.md" "tokens: unknown" && pass "token usage is reported as unknown, not zero" || fail "usage shown as a number"
+      grep -q '"event":"provider_error"' "$d/proxy.log" && grep '"event":"provider_error"' "$d/proxy.log" | grep -q '"status":413.*"window":"TPM"' && pass "proxy logged the 413 with its limit window, without message text" || fail "proxy did not log provider_error facts"
+      ;;
+    ratelimit)
+      # The provider answers 429 forever. Retries must stay inside a bounded budget and every session must be cleaned up.
+      make_repo "$work/repo-ratelimit"
+      run_case ratelimit ratelimit "$work/repo-ratelimit" REVIEW_AGENTS=code_quality REVIEW_SESSION_RETRIES=2
+      d="$work/ratelimit"
+      echo "  exit=$(rc ratelimit)"; sed -n '1,12p' "$d/report.md" | sed 's/^/    /'
+      [ "$(rc ratelimit)" = 2 ] && pass "persistent rate limiting ends the review incomplete (exit 2)" || fail "exit code $(rc ratelimit), expected 2"
+      has "$d/report.md" "Verdict: not_determined" && pass "verdict is not_determined" || fail "wrong verdict"
+      nf=$(grep '"event":"attempt_failed"' "$d/run.jsonl" | grep -c '"kind":"rate_limit"'); [ "$nf" = 6 ] && pass "six attempts (3 tries x 2 models), each failing as rate_limit" || fail "attempt_failed rate_limit count = $nf"
+      for dec in retry_same_model fallback_model exhausted; do grep '"event":"attempt_failed"' "$d/run.jsonl" | grep -q "\"decision\":\"$dec\"" && pass "decision logged: $dec" || fail "decision $dec not logged"; done
+      nr=$(grep -c '"event":"session_retry"' "$d/run.jsonl"); [ "$nr" -ge 6 ] && pass "OpenCode's own retries were traced ($nr)" || fail "session_retry events = $nr"
+      nreq=$(grep -c '"answered":429' "$d/stub.log"); [ "$nreq" -ge 6 ] && [ "$nreq" -le 30 ] && pass "provider requests stayed inside the retry budget ($nreq <= 30)" || fail "provider requests = $nreq"
+      na=$(grep -c '"event":"attempt_session"' "$d/run.jsonl"); nc=$(grep -c '"event":"session_cleanup"' "$d/run.jsonl")
+      [ "$na" = "$nc" ] && [ "$na" -ge 6 ] && pass "every one of the $na sessions was cleaned up" || fail "sessions=$na cleanups=$nc"
+      grep '"event":"session_cleanup"' "$d/run.jsonl" | grep -qE '"idle":false|"abort":"failed"|"delete":"failed"' && fail "a cleanup step failed" || pass "no cleanup step failed"
+      ;;
+    abandon)
+      # An attempt abandoned by its deadline must take its OpenCode session with it, and a replacement must not overlap it.
+      mkdir -p "$work/abandon"
+      pj="crl-abandon"
+      ( export STUB_MODE=ratelimit_slow COMPOSE_PROFILES=stub MSYS_NO_PATHCONV=1 REVIEW_REPO_DIR=. REVIEW_BASE=x REVIEW_HEAD=y
+        docker compose -p "$pj" -f "$rootn/docker/compose.yml" up -d proxy stub >/dev/null 2>&1
+        docker compose -p "$pj" -f "$rootn/docker/compose.yml" run --rm --no-deps -v "$rootn/tests/integration/abandon-probe.mjs:/probe.mjs:ro" --entrypoint node agent /probe.mjs >"$work/abandon/probe.out" 2>"$work/abandon/probe.err" )
+      grep -E '"(check|summary)"' "$work/abandon/probe.out" | sed 's/^/    /' | cut -c1-230
+      grep -q '"summary":"ABANDON PROBE","failures":0' "$work/abandon/probe.out" && pass "abandoned attempt leaves no session; replacement never overlaps" || fail "abandon probe reported failures"
+      ;;
     error)
       make_repo "$work/repo-error"
       run_case error error "$work/repo-error" REVIEW_AGENTS=security

@@ -11,8 +11,13 @@ real network topology. Only the model is replaced (by `stub-groq.mjs`) in the sc
 
 ## Scripted scenarios (no key, no tokens)
 ```
-bash tests/integration/run-integration.sh <empty-work-dir> [attack] [obey] [report] [error]
+bash tests/integration/run-integration.sh <empty-work-dir> [attack] [obey] [report] [error] [overflow] [ratelimit] [abandon]
 ```
+Lifecycle scenarios (see `docs/execution-lifecycle.md`): `overflow` (provider answers 413: the request is sent once,
+no compaction, tool call still logged, non-retryable, usage reported as unknown), `ratelimit` (always 429, run with
+`REVIEW_SESSION_RETRIES=2`: six attempts, bounded provider requests, every session cleaned up) and `abandon`
+(`abandon-probe.mjs` runs inside the agent container against the real OpenCode and checks by session id that an
+abandoned attempt leaves no session behind and never overlaps its replacement).
 Creates a synthetic git repo with one seeded SQL injection (`make-fixture-repo.sh`, `INJECT=1` adds a prompt-injection
 comment), then for each scenario starts an isolated compose project, runs the review, asserts the outcome, and tears
 the project down. It uses a recognisable DUMMY key (`gsk_STUBKEY...`), never a real one. The `report` scenario also runs

@@ -20,6 +20,21 @@ export interface Timeouts {
   readonly overallMs: number;
   readonly inactivityMs: number;
   readonly heartbeatMs: number;
+  /** How long an aborted attempt may take to cancel and delete its OpenCode session before the run stops waiting. */
+  readonly abortGraceMs: number;
+}
+
+/** How one OpenCode session is driven. None of these scale with REVIEW_TIMEOUT_SCALE: they are not attempt deadlines. */
+export interface SessionLifecycle {
+  /** Interval between status polls. */
+  readonly pollMs: number;
+  /** Timeout of each individual HTTP call to the local OpenCode server (not of the attempt). */
+  readonly requestTimeoutMs: number;
+  readonly startGraceMs: number;
+  readonly cleanupWaitMs: number;
+  /** OpenCode retries a failing provider call by itself; past this many retries the attempt is ended. */
+  readonly maxProviderRetries: number;
+  readonly maxPollFailures: number;
 }
 
 /** Agent-side config. It never holds the real Groq key: `groqBaseUrl` points at the credential proxy. */
@@ -32,6 +47,7 @@ export interface Config {
   readonly maxRetries: number;
   readonly reviewerConcurrency: number;
   readonly timeouts: Timeouts;
+  readonly session: SessionLifecycle;
 }
 
 /** Proxy-side config. Holds the real key, so log or serialise only `toSafeView(...)` of it. */
@@ -84,6 +100,12 @@ function timeoutScale(value: string | undefined): number {
   return parseOrThrow(z.string().regex(/^\d+$/).transform(Number).refine((n) => n >= 1 && n <= 10, "REVIEW_TIMEOUT_SCALE must be an integer from 1 to 10"), value.trim());
 }
 
+/** REVIEW_SESSION_RETRIES: how many times OpenCode may retry a failing provider call within one attempt. 1 to 20, default 5. */
+function sessionRetries(value: string | undefined): number {
+  if (value === undefined || value.trim() === "") return 5;
+  return parseOrThrow(z.string().regex(/^\d+$/).transform(Number).refine((n) => n >= 1 && n <= 20, "REVIEW_SESSION_RETRIES must be an integer from 1 to 20"), value.trim());
+}
+
 export function loadConfig(env: Env): Config {
   // Presence alone is a failure, even when empty: the agent container must never be given the key.
   if (env["GROQ_API_KEY"] !== undefined) {
@@ -97,6 +119,7 @@ export function loadConfig(env: Env): Config {
     overallMs: 25 * MINUTE_MS * scale,
     inactivityMs: MINUTE_MS,
     heartbeatMs: MINUTE_MS / 2,
+    abortGraceMs: MINUTE_MS,
   });
   return Object.freeze({
     groqBaseUrl,
@@ -107,6 +130,10 @@ export function loadConfig(env: Env): Config {
     maxRetries: MAX_RETRIES,
     reviewerConcurrency: REVIEWER_CONCURRENCY,
     timeouts,
+    session: Object.freeze({
+      pollMs: 1000, requestTimeoutMs: 30_000, startGraceMs: 30_000, cleanupWaitMs: 10_000,
+      maxProviderRetries: sessionRetries(env["REVIEW_SESSION_RETRIES"]), maxPollFailures: 2,
+    }),
   });
 }
 

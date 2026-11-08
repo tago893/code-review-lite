@@ -37,6 +37,8 @@ export interface StructuredResult {
   readonly content: string;
   readonly tokensIn: number;
   readonly tokensOut: number;
+  /** False when the response carried no usage block. */
+  readonly tokensKnown?: boolean;
 }
 
 /** A no-tools, schema-constrained model call. Tools cannot be combined with structured output, so this is separate. */
@@ -86,5 +88,6 @@ function extract(text: string): StructuredResult {
   const content = parsed.choices?.[0]?.message?.content;
   if (typeof content !== "string") throw new Error("malformed provider response");
   const count = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0);
-  return { content, tokensIn: count(parsed.usage?.prompt_tokens), tokensOut: count(parsed.usage?.completion_tokens) };
+  const reported = typeof parsed.usage?.prompt_tokens === "number" || typeof parsed.usage?.completion_tokens === "number";
+  return { content, tokensIn: count(parsed.usage?.prompt_tokens), tokensOut: count(parsed.usage?.completion_tokens), tokensKnown: reported };
 }

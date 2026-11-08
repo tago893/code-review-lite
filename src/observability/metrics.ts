@@ -16,6 +16,11 @@ export interface MetricsSnapshot {
     readonly byStatus: Readonly<Record<string, number>>;
   };
   readonly tokens: TokenCount & { readonly byAgent: Readonly<Record<string, TokenCount>> };
+  /**
+   * How trustworthy `tokens` is. A run whose provider reported no usage adds nothing to `tokens` (it is not a zero) and
+   * is counted in `unreportedRuns`; usage from work that was cut short makes the total a lower bound.
+   */
+  readonly usage: { readonly unreportedRuns: number; readonly lowerBound: boolean };
   readonly costUsd: number;
   readonly drops: { readonly total: number; readonly byReason: Readonly<Record<string, number>> };
   readonly retries: number;
@@ -27,7 +32,10 @@ export interface MetricsSnapshot {
 export interface Metrics {
   recordFinding(finding: Pick<Finding, "reviewer" | "severity">, status: FindingLevel): Metrics;
   recordDrop(reason: DropReason): Metrics;
-  recordTokens(agent: string, input: number, output: number): Metrics;
+  /** `complete: false` marks the usage as a lower bound (the work was cut short). */
+  recordTokens(agent: string, input: number, output: number, complete?: boolean): Metrics;
+  /** A run that used the provider but reported no usage: its tokens are unknown, not zero. */
+  recordUnreportedTokens(agent: string): Metrics;
   recordCost(usd: number): Metrics;
   recordRetry(): Metrics;
   recordFallback(): Metrics;
@@ -39,6 +47,7 @@ export interface Metrics {
 const EMPTY: MetricsSnapshot = {
   findings: { total: 0, byReviewer: {}, bySeverity: {}, byStatus: {} },
   tokens: { input: 0, output: 0, byAgent: {} },
+  usage: { unreportedRuns: 0, lowerBound: false },
   costUsd: 0,
   drops: { total: 0, byReason: {} },
   retries: 0,
@@ -66,7 +75,7 @@ function wrap(s: MetricsSnapshot): Metrics {
         },
       }),
     recordDrop: (reason) => next({ drops: { total: s.drops.total + 1, byReason: bump(s.drops.byReason, reason) } }),
-    recordTokens: (agent, input, output) => {
+    recordTokens: (agent, input, output, complete = true) => {
       const i = valid(input) ? input : 0;
       const o = valid(output) ? output : 0;
       const prior = s.tokens.byAgent[agent] ?? { input: 0, output: 0 };
@@ -76,8 +85,10 @@ function wrap(s: MetricsSnapshot): Metrics {
           output: s.tokens.output + o,
           byAgent: { ...s.tokens.byAgent, [agent]: { input: prior.input + i, output: prior.output + o } },
         },
+        usage: { ...s.usage, lowerBound: s.usage.lowerBound || !complete },
       });
     },
+    recordUnreportedTokens: () => next({ usage: { unreportedRuns: s.usage.unreportedRuns + 1, lowerBound: true } }),
     recordCost: (usd) => next({ costUsd: s.costUsd + (valid(usd) ? usd : 0) }),
     recordRetry: () => next({ retries: s.retries + 1 }),
     recordFallback: () => next({ fallbacks: s.fallbacks + 1 }),

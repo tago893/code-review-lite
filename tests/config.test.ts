@@ -97,6 +97,7 @@ describe("loadConfig (agent side)", () => {
       overallMs: 25 * 60_000,
       inactivityMs: 60_000,
       heartbeatMs: 30_000,
+      abortGraceMs: 60_000,
     });
   });
 

@@ -78,7 +78,7 @@ export async function judge(findings: readonly Finding[], deps: JudgeDeps): Prom
   const session = await deps.sessions(deps.repoRoot).catch((e: unknown) => { throw scrubProviderError(e); });
   const signal = deps.signal ? { signal: deps.signal } : {};
   const explored = await session
-    .explore({ model: deps.model, prompt: `${phase1}\n\n<candidate_findings>\n${candidates}\n</candidate_findings>\n\nCheck them now and write your Phase 1 notes.`, ...signal })
+    .explore({ model: deps.model, attemptId: "coordinator#1", prompt: `${phase1}\n\n<candidate_findings>\n${candidates}\n</candidate_findings>\n\nCheck them now and write your Phase 1 notes.`, ...signal })
     .catch((e: unknown) => { throw scrubProviderError(e); });
 
   const notes = gate("phase2_notes", explored.text).trim();

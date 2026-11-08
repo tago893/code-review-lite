@@ -22,7 +22,7 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 interface Calls { explored: string[]; structured: string[]; sessions: number }
 function deps(notes: string, structuredContent: string, calls: Calls = { explored: [], structured: [], sessions: 0 }): { d: JudgeDeps; calls: Calls } {
-  const session: ExploreSession = { explore: async (i) => { calls.explored.push(i.prompt); return { text: notes, tokensIn: 3, tokensOut: 2 }; }, close: async () => undefined };
+  const session: ExploreSession = { explore: async (i) => { calls.explored.push(i.prompt); return { text: notes, tokensIn: 3, tokensOut: 2, tokensKnown: true }; }, close: async () => undefined };
   const structured: StructuredCall = async (r) => { calls.structured.push(`${r.system}|${r.user}`); return { content: structuredContent, tokensIn: 4, tokensOut: 1 }; };
   return { d: { sessions: async () => { calls.sessions += 1; return session; }, structured, model: "big", repoRoot: dir, promptPath: join(dir, "coordinator.md") }, calls };
 }

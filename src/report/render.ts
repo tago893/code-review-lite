@@ -98,13 +98,23 @@ function fence(text: string): string[] {
   return [`  ${mark}`, ...text.replace(/\r/g, "").split("\n").map((l) => `  ${l}`), `  ${mark}`];
 }
 
+/** Unknown usage is never shown as zero, and a partial total is labelled as a lower bound. */
+function tokensLine(m: MetricsSnapshot): string {
+  const { unreportedRuns, lowerBound } = m.usage;
+  const known = m.tokens.input + m.tokens.output > 0;
+  const silent = `${unreportedRuns} run${unreportedRuns === 1 ? "" : "s"} reported no usage`;
+  if (!known && unreportedRuns > 0) return `tokens: unknown (${silent})`;
+  if (lowerBound) return `tokens: at least ${m.tokens.input} in / ${m.tokens.output} out (lower bound${unreportedRuns > 0 ? `; ${silent}` : ""})`;
+  return `tokens: ${m.tokens.input} in / ${m.tokens.output} out`;
+}
+
 function metricsSection(m: MetricsSnapshot): string[] {
   const count = (o: Readonly<Record<string, number>>): string => Object.entries(o).map(([k, v]) => `${k}=${v}`).join(", ") || "none";
   return [
     "## Metrics",
     `findings: ${m.findings.total} (by severity: ${count(m.findings.bySeverity)}; by level: ${count(m.findings.byStatus)})`,
     `dropped: ${m.drops.total} (${count(m.drops.byReason)})`,
-    `tokens: ${m.tokens.input} in / ${m.tokens.output} out`,
+    tokensLine(m),
     `retries: ${m.retries}; fallbacks: ${m.fallbacks}`,
     `cost: $${m.costUsd.toFixed(4)}${m.durationMs === undefined ? "" : `; duration: ${(m.durationMs / 1000).toFixed(1)}s`}`,
   ];

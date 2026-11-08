@@ -69,3 +69,20 @@ describe("renderReport", () => {
     expect(text).toContain("citation=1");
   });
 });
+
+describe("renderReport: unknown and partial token usage", () => {
+  it("says unknown, not zero, when no run reported usage", () => {
+    const text = renderReport(data({ metrics: createMetrics().recordUnreportedTokens("code_quality").snapshot() }));
+    expect(text).toContain("tokens: unknown (1 run reported no usage)");
+    expect(text).not.toContain("tokens: 0 in / 0 out");
+  });
+
+  it("labels a partial total as a lower bound and states how many runs reported nothing", () => {
+    const text = renderReport(data({ metrics: createMetrics().recordTokens("a", 1200, 80, false).recordUnreportedTokens("b").snapshot() }));
+    expect(text).toContain("tokens: at least 1200 in / 80 out (lower bound; 1 run reported no usage)");
+  });
+
+  it("keeps the plain figure when every run reported complete usage", () => {
+    expect(renderReport(data({ metrics: createMetrics().recordTokens("a", 7, 3).snapshot() }))).toContain("tokens: 7 in / 3 out");
+  });
+});
