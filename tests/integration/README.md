@@ -11,11 +11,18 @@ real network topology. Only the model is replaced (by `stub-groq.mjs`) in the sc
 
 ## Scripted scenarios (no key, no tokens)
 ```
-bash tests/integration/run-integration.sh <empty-work-dir> [attack] [obey] [report] [error] [overflow] [ratelimit] [abandon] [stepcap] [stepcap_stubborn]
+bash tests/integration/run-integration.sh <empty-work-dir> [attack] [obey] [report] [error] [overflow] [ratelimit] [abandon] [stepcap] [stepcap_stubborn] [hostile] [mcpdown] [budget] [offline]
 ```
 Step-cap scenarios: `stepcap` (a model that never stops by itself but obeys OpenCode's last-step "text only" instruction;
 `REVIEW_INVESTIGATION_STEPS=3`: exactly 3 model calls, review incomplete, unchanged files still readable) and
 `stepcap_stubborn` (a model that ignores the instruction: the driver ends the attempt, non-retryable, review incomplete).
+Tooling and isolation scenarios: `attack` (the model is offered only the four `cra_*` tools; built-in and MCP escapes are
+all refused), `hostile` (a repository with executable plugins/tools, an MCP entry, an AGENTS.md injection and a report
+forgery: executes under a raw OpenCode, inert under CRA's launch), `mcpdown` (the MCP server cannot start: review
+incomplete, no tool-enabled request reaches the model), `budget` (`PROXY_MAX_REQUESTS=3`: three requests forwarded, one
+refused, no retry, no compaction, review incomplete), `offline` (live mode without `CRA_ALLOW_LIVE=1` is refused; a
+real-looking key in stub mode is refused by the proxy; the stub-mode proxy cannot reach api.groq.com, example.com or a
+raw IP).
 Lifecycle scenarios (see `docs/execution-lifecycle.md`): `overflow` (provider answers 413: the request is sent once,
 no compaction, tool call still logged, non-retryable, usage reported as unknown), `ratelimit` (always 429, run with
 `REVIEW_SESSION_RETRIES=2`: six attempts, bounded provider requests, every session cleaned up) and `abandon`
@@ -31,6 +38,8 @@ Exit status is non-zero if any check fails.
 ## Live run (spends Groq tokens)
 ```
 export GROQ_API_KEY=...            # in your shell only; passed to the proxy container by name
+export CRA_ALLOW_LIVE=1            # explicit authorization; without it docker/run.sh refuses to run live
+export UPSTREAM_URL=https://api.groq.com   # explicit; the proxy has no default upstream
 bash tests/integration/make-fixture-repo.sh <empty-dir>      # prints BASE= and HEAD=
 REVIEW_AGENTS=security REVIEW_TIMEOUT_SCALE=3 \
   bash docker/run.sh --repo <empty-dir> --base <BASE> --head <HEAD> --out-dir <out> --keep

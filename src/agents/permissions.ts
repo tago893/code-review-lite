@@ -1,3 +1,4 @@
+import { APPROVED_TOOL_IDS } from "../mcp/ids.js";
 import { reviewerPermission, type PermissionRule } from "../workspace/permissions.js";
 
 export interface AgentPermissions {
@@ -9,7 +10,7 @@ export interface AgentPermissions {
   isAllowed(tool: string): boolean;
 }
 
-export const READ_TOOLS: readonly string[] = Object.freeze(["read", "grep", "glob", "list"]);
+export const READ_TOOLS: readonly string[] = APPROVED_TOOL_IDS;
 
 /**
  * OpenCode permissions for a reviewer working in `repoRoot`: read, grep, glob and list only, with everything else

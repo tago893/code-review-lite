@@ -1,3 +1,10 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { SERVER_NAME } from "../mcp/ids.js";
+import { CONTEXT_ROOT } from "../workspace/permissions.js";
+import { verifyToolset, type ToolsetApi } from "./toolset.js";
 import { TRANSPORT_MARKER } from "../resilience/errors.js";
 import { sanitizeEnv } from "../safety/sanitize.js";
 import type { ExploreSession, LaunchOptions } from "./opencode.js";
@@ -12,6 +19,19 @@ const PROVIDER_ID = "groq";
 const PORT = 4096;
 /** The agent that reviewer investigations run under; it carries the step cap. The coordinator uses the default agent. */
 const INVESTIGATOR = "investigator";
+/** The compiled MCP server, next to this directory in dist/. */
+const MCP_SERVER_PATH = fileURLToPath(new URL("../mcp/server.js", import.meta.url));
+const TOOLSET_WAIT_MS = 15_000;
+
+/**
+ * Environment OpenCode is always started with. Trusted reviewer configuration is passed inline from this module, never
+ * read from the repository: with project config on, OpenCode loads plugins, tools and MCP servers from `.opencode/` and
+ * `opencode.json` in the working directory (code execution) and puts AGENTS.md / CLAUDE.md into the system prompt.
+ */
+export const TRUSTED_OPENCODE_ENV: Readonly<Record<string, string>> = Object.freeze({
+  OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+  OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
+});
 
 type Call<T> = Promise<{ data?: T }>;
 const THROW = { throwOnError: true } as const;
@@ -25,6 +45,8 @@ interface SdkClient {
     abort(params: { sessionID: string }, opts: typeof THROW): Promise<unknown>;
     delete(params: { sessionID: string }, opts: typeof THROW): Promise<unknown>;
   };
+  readonly mcp: { status(params: Record<string, never>, opts: typeof THROW): Call<Readonly<Record<string, { status?: string }>>> };
+  readonly tool: { ids(params: Record<string, never>, opts: typeof THROW): Call<readonly string[]> };
 }
 
 interface SdkModule {
@@ -49,13 +71,20 @@ export async function launchOpenCode(options: LaunchOptions, processEnv: NodeJS.
     throw new Error("agent environment still contains credentials; refusing to start OpenCode");
   }
   const sdk = (await import(SDK_MODULE)) as SdkModule;
-  process.chdir(options.repoRoot);
+  Object.assign(process.env, TRUSTED_OPENCODE_ENV);
+  // OpenCode's working directory is a fresh, empty, trusted directory, never the reviewed repository. Setting
+  // OPENCODE_DISABLE_PROJECT_CONFIG alone is not enough: measured with 1.19.5, `.opencode/plugin/*.js` in the working
+  // directory still executes when the first session starts. Repository files are reached by absolute path only.
+  process.chdir(mkdtempSync(join(tmpdir(), "cra-opencode-")));
   const server = await sdk.createOpencodeServer({
     hostname: "127.0.0.1",
     port: PORT,
     config: {
       provider: { [PROVIDER_ID]: { options: { baseURL: options.baseUrl, apiKey: "proxy-placeholder" } } },
       permission: options.permissions.permission,
+      // The only file tools: CRA's own bounded MCP server, a child process reading only the snapshot and review context.
+      // Trusted configuration passed inline; nothing here comes from the repository.
+      mcp: { [SERVER_NAME]: { type: "local", command: [process.execPath, MCP_SERVER_PATH], environment: { CRA_MCP_ROOT: options.repoRoot, CRA_MCP_CONTEXT: CONTEXT_ROOT }, enabled: true } },
       agent: { [INVESTIGATOR]: { mode: "primary", description: "Bounded read-only code investigation", steps: options.lifecycle.maxInvestigationSteps } },
       compaction: { auto: false, prune: false },
       share: "disabled",
@@ -63,6 +92,12 @@ export async function launchOpenCode(options: LaunchOptions, processEnv: NodeJS.
     },
   });
   const client = sdk.createOpencodeClient({ baseUrl: server.url, fetch: boundedFetch(options.lifecycle.requestTimeoutMs) });
+  try {
+    await verifyToolset(toolsetApi(client), { waitMs: TOOLSET_WAIT_MS, pollMs: 250 });
+  } catch (error) {
+    server.close(); // no review runs without the verified bounded tools; an unbounded built-in is never a fallback
+    throw error;
+  }
   const api = sessionApi(client);
   const driver: DriverOptions = {
     pollMs: options.lifecycle.pollMs,
@@ -114,6 +149,13 @@ async function guarded<T>(run: () => Promise<T>): Promise<T> {
   } catch (error) {
     throw asTransport(error);
   }
+}
+
+function toolsetApi(client: SdkClient): ToolsetApi {
+  return {
+    mcpStatus: () => guarded(async () => (await client.mcp.status({}, THROW)).data ?? {}),
+    toolIds: () => guarded(async () => (await client.tool.ids({}, THROW)).data ?? []),
+  };
 }
 
 function sessionApi(client: SdkClient): SessionApi {

@@ -106,6 +106,19 @@ describe("prepareWorkspace: what never gets in", () => {
     expect(result.skipped.map((s) => s.reason)).toContain("sensitive");
   });
 
+  it("excludes agent-tool configuration a repository could use to register executable plugins, tools or MCP servers", async () => {
+    put(".opencode/plugin/evil.js", "export const Evil = async () => ({});\n");
+    put(".opencode/tool/evil.js", "export default {};\n");
+    put("opencode.json", '{"mcp":{}}\n');
+    put("opencode.jsonc", "{}\n");
+    put("sub/OpenCode.json", "{}\n");
+    put("src/ok.ts", "ok\n");
+    const result = await prepareWorkspace({ sourceDir: raw, outDir: out });
+    expect(relOut()).toEqual(["src", "src/ok.ts"]);
+    if (result.status !== "ready") throw new Error("expected ready");
+    expect(result.skipped.map((s) => s.reason)).toContain("sensitive");
+  });
+
   it("copies no symlink and never follows one", async () => {
     put("src/real.ts", "real\n");
     symlinkSync("/etc", join(raw, "src/to_etc"));

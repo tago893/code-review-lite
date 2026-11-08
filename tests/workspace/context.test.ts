@@ -63,10 +63,10 @@ describe("reviewerPermission", () => {
     }
   });
 
-  it("allows only read-side exploration and fences everything outside the workspace", () => {
-    expect([p["grep"], p["glob"], p["list"]]).toEqual(["allow", "allow", "allow"]);
-    expect(p["external_directory"]).toEqual({ "*": "deny", "/review/context/**": "allow" });
-    expect(p["read"]).toMatchObject({ "*.env": "deny", "*.env.*": "deny" });
+  it("denies OpenCode's own file tools and allows only the bounded MCP tools", () => {
+    expect([p["read"], p["grep"], p["glob"], p["list"]]).toEqual(["deny", "deny", "deny", "deny"]);
+    expect([p["cra_read"], p["cra_grep"], p["cra_glob"], p["cra_list"]]).toEqual(["allow", "allow", "allow", "allow"]);
+    expect(p["external_directory"]).toEqual({ "*": "deny" });
   });
 
   it("is frozen", () => {

@@ -1,0 +1,6 @@
+# Applied automatically by docker/run.sh whenever STUB_MODE is set (tests with a scripted model).
+# The proxy and the stub share a network with no route out, so a provider-free test cannot reach the internet
+# even if every other safeguard failed.
+networks:
+  egress:
+    internal: true

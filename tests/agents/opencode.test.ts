@@ -104,7 +104,8 @@ describe("createOpenCodeRunner: two-phase flow", () => {
     expect(launch?.repoRoot).toBe("/repo");
     expect(launch?.baseUrl).toBe("http://proxy:8080/openai/v1");
     expect(launch?.permissions.isAllowed("bash")).toBe(false);
-    expect(launch?.permissions.isAllowed("read")).toBe(true);
+    expect(launch?.permissions.isAllowed("cra_read")).toBe(true);
+    expect(launch?.permissions.isAllowed("read")).toBe(false);
   });
 });
 

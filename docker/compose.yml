@@ -20,7 +20,10 @@ services:
     environment:
       - GROQ_API_KEY
       - UPSTREAM_URL
+      - PROXY_MODE
+      - PROXY_ALLOW_LIVE
       - PROXY_LOG_BODIES
+      - PROXY_MAX_REQUESTS
     networks: [internal, egress]
     volumes:
       - proxy_logs:/logs

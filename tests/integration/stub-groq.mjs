@@ -30,6 +30,16 @@ const ATTACKS = [
   ["read", { filePath: "/proc/self/environ" }],
   ["edit", { filePath: "/repo/src/users.ts", oldString: "name", newString: "pwned" }],
   ["webfetch", { url: "https://example.com", format: "text" }],
+  // The unbounded built-in file tools are denied; the bounded MCP tools must refuse anything outside the snapshot.
+  ["grep", { pattern: "root", path: "/etc" }],
+  ["glob", { pattern: "**/*", path: "/" }],
+  ["cra_read", { path: "/etc/passwd" }],
+  ["cra_read", { path: "../../etc/passwd" }],
+  ["cra_read", { path: "/review/out/report.md" }],
+  ["cra_read", { path: "/proc/self/environ" }],
+  ["cra_grep", { pattern: "root", path: "/etc" }],
+  ["cra_glob", { pattern: "**/*", path: "/" }],
+  ["cra_list", { path: "/review" }],
 ];
 
 function chunk(delta, finish, usage) {
@@ -87,7 +97,7 @@ function respond(body, res) {
       res.end(JSON.stringify({ error: { message: "Request too large for model `openai/gpt-oss-120b` on tokens per minute (TPM): Limit 8000, Requested 11111, please reduce your message size and try again.", type: "tokens", code: "rate_limit_exceeded" } }));
       return { kind, stream: wantsStream, toolResults: hasToolResults, answered: 413 };
     }
-    parts = compaction ? textTurn("summary") : toolTurn([["read", { filePath: "/repo/src/users.ts" }]]);
+    parts = compaction ? textTurn("summary") : toolTurn([["cra_read", { path: "/repo/src/users.ts" }]]);
   } else if (MODE === "loop" || MODE === "loop_stubborn") {
     const toolCount = Array.isArray(body.tools) ? body.tools.length : 0;
     const results = messages.filter((m) => m.role === "tool").length;
@@ -98,13 +108,25 @@ function respond(body, res) {
     const told = /text ONLY/i.test(tail);
     const offered = toolCount > 0 && body.tool_choice !== "none" && (MODE === "loop_stubborn" || !told);
     kind = offered ? "loop_tool" : "loop_final";
-    const picks = [["read", { filePath: "/repo/src/users.ts" }], ["read", { filePath: "/repo/src/server.ts" }], ["grep", { pattern: "query" }], ["glob", { pattern: "src/*.ts" }]];
+    const picks = [["cra_read", { path: "/repo/src/users.ts" }], ["cra_read", { path: "/repo/src/server.ts" }], ["cra_grep", { pattern: "query" }], ["cra_glob", { pattern: "src/*.ts" }]];
     parts = offered ? toolTurn([picks[results % picks.length]]) : textTurn(PARTIAL_NOTES);
     setTimeout(() => sse(res, parts), 600); // a model takes time; this also keeps the cap's enforcement lag realistic
     return { kind, stream: wantsStream, toolResults: hasToolResults, tools: toolCount, toolChoice: body.tool_choice ?? null, messages: messages.length, lastRole: last?.role ?? null, told, lastTail: tail };
+  } else if (MODE === "workload") {
+    // The scripted bounded-reading workload: page through a large unchanged file, grep across files, read an unchanged
+    // consumer, then answer. Same steps whatever the tool names, so request sizes can be compared like for like.
+    const results = messages.filter((m) => m.role === "tool").length;
+    const steps = [
+      ["cra_read", { path: "src/orders.ts" }],
+      ["cra_read", { path: "src/orders.ts", offset: 101 }],
+      ["cra_grep", { pattern: "findUser" }],
+      ["cra_read", { path: "src/consumer.ts" }],
+    ];
+    kind = results < steps.length ? "workload_tool" : "workload_final";
+    parts = results < steps.length ? toolTurn([steps[results]]) : textTurn(NOTES);
   } else if (MODE === "tools" || MODE === "report") {
     kind = hasToolResults ? "final" : "read";
-    parts = hasToolResults ? textTurn(MODE === "report" ? NOTES : "No findings.") : toolTurn([["read", { filePath: "/repo/src/users.ts" }]]);
+    parts = hasToolResults ? textTurn(MODE === "report" ? NOTES : "No findings.") : toolTurn([["cra_read", { path: "/repo/src/users.ts" }]]);
   } else {
     kind = "final";
     parts = textTurn("No findings.");
@@ -148,7 +170,10 @@ http
       let body = {};
       try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { /* answered below */ }
       const info = respond(body, res);
-      log({ event: "request", path: req.url, keyInjected, ...info });
+      // Names of any HOSTILE_*_MARKER (tests/integration/hostile-files.mjs) that reached the model, to prove what did not.
+      const markers = [...new Set(Buffer.concat(chunks).toString("utf8").match(/HOSTILE_[A-Z_]+_MARKER/g) ?? [])];
+      const toolNames = Array.isArray(body.tools) ? body.tools.map((t) => t?.function?.name ?? t?.name) : [];
+      log({ event: "request", path: req.url, keyInjected, ...info, ...(toolNames.length > 0 ? { toolNames } : {}), ...(markers.length > 0 ? { markers } : {}) });
     });
   })
   .listen(9000, "0.0.0.0", () => log({ event: "listening", port: 9000 }));

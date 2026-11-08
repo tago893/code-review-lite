@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Real-container integration scenarios with a scripted model (no provider key, no network).
-#   tests/integration/run-integration.sh <work-dir> [scenario...]      scenarios: attack obey report error overflow ratelimit abandon stepcap stepcap_stubborn
+#   tests/integration/run-integration.sh <work-dir> [scenario...]      scenarios: attack obey report error overflow ratelimit abandon stepcap stepcap_stubborn hostile mcpdown budget budget_stubborn offline workload
 # Every scenario runs the real CLI, the real OpenCode SDK, the real prep/agent/proxy containers and the real
 # network topology. Only the model is replaced, by tests/integration/stub-groq.mjs behind the real proxy, which
 # holds a recognisable DUMMY key (never a real one) so key handling can be asserted.
@@ -10,7 +10,7 @@ scenarios=("$@"); [ ${#scenarios[@]} -eq 0 ] && scenarios=(attack obey report er
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 rootn="$(cd "$root" && (pwd -W 2>/dev/null || pwd))"   # native path for docker, which gets MSYS_NO_PATHCONV=1
 export GROQ_API_KEY="gsk_STUBKEY0123456789abcdefSTUBKEY0123456789abcdef"   # dummy; the stub checks the proxy injected it
-export PROXY_LOG_BODIES=1 UPSTREAM_URL="http://stub:9000"
+export PROXY_LOG_BODIES=1 UPSTREAM_URL="http://stub:9000" PROXY_MODE=stub
 fails=0
 pass() { echo "  PASS $1"; }
 fail() { echo "  FAIL $1"; fails=$((fails + 1)); }
@@ -29,7 +29,7 @@ run_case() { # run_case <name> <STUB_MODE> <repo> [env...]
     bash "$root/docker/run.sh" --repo "$repo" --base "$BASE" --head "$HEAD" --out-dir "$work/$name" --keep >"$work/$name.stdout" 2>"$work/$name.stderr" )
   echo $? >"$work/$name.rc"
 }
-teardown() { COMPOSE_PROFILES=stub REVIEW_REPO_DIR=. REVIEW_BASE=x REVIEW_HEAD=y docker compose -p "crl-$1" -f "$rootn/docker/compose.yml" down -v >/dev/null 2>&1; }
+teardown() { COMPOSE_PROFILES=stub REVIEW_REPO_DIR=. REVIEW_BASE=x REVIEW_HEAD=y docker compose -p "crl-$1" -f "$rootn/docker/compose.yml" -f "$rootn/docker/compose.offline.yml" down -v >/dev/null 2>&1; }
 rc() { cat "$work/$1.rc"; }
 
 for s in "${scenarios[@]}"; do
@@ -45,6 +45,11 @@ for s in "${scenarios[@]}"; do
       done
       grep '"event":"tool_call"' "$d/run.jsonl" | grep -E '/etc/passwd|/proc/self/environ|/review/out' | grep -q '"status":"completed"' && fail "an out-of-bounds read completed" || pass "reads of /etc/passwd, /proc/self/environ and /review/out did not complete"
       [ ! -e "$d/pwned.txt" ] && [ ! -e "$d/env.txt" ] && pass "no file was created in /review/out" || fail "forbidden write created a file"
+      # The model is offered exactly the four bounded MCP tools, never a built-in; every escape through them is refused.
+      offered=$(grep -o '"toolNames":\[[^]]*\]' "$d/stub.log" | sort -u | paste -sd, -)
+      [ "$offered" = '"toolNames":["cra_glob","cra_grep","cra_list","cra_read"]' ] && pass "the model was offered exactly cra_glob, cra_grep, cra_list, cra_read" || fail "unexpected tool set offered: $offered"
+      escapes=$(grep '"event":"tool_call"' "$d/run.jsonl" | grep '"tool":"cra_' | grep -vc '"status":"error"')
+      [ "$escapes" = 0 ] && pass "every out-of-bounds cra_* call (absolute, traversal, /proc, /review/out, /etc, /) was refused" || fail "$escapes out-of-bounds cra_* call(s) were not refused"
       has "$d/stub.log" '"keyInjected":true' && pass "proxy replaced the placeholder with the credential (stub saw it)" || fail "stub never saw the injected credential"
       has "$d/stub.log" '"keyInjected":false' && fail "a request reached the stub without the credential" || pass "every request carried the proxy credential"
       ;;
@@ -82,7 +87,7 @@ for s in "${scenarios[@]}"; do
       has "$d/report.md" "model_context_overflow" && pass "failure is named context overflow" || fail "failure not named"
       n=$(grep -c '"answered":413' "$d/stub.log" 2>/dev/null); [ "$n" = 1 ] && pass "the oversized request was sent exactly once, not repeated unchanged" || fail "oversized request sent $n times"
       has "$d/stub.log" '"kind":"compaction"' && fail "OpenCode compacted the investigation" || pass "no compaction request was made (automatic compaction is off)"
-      grep '"event":"tool_call"' "$d/run.jsonl" | grep -q '"tool":"read"' && pass "the tool call made before the failure was logged" || fail "tool call lost with the failed attempt"
+      grep '"event":"tool_call"' "$d/run.jsonl" | grep -q '"tool":"cra_read"' && pass "the tool call made before the failure was logged" || fail "tool call lost with the failed attempt"
       grep '"event":"attempt_failed"' "$d/run.jsonl" | grep -q '"kind":"context_overflow".*"decision":"stop_not_retryable"' && pass "decision logged: context_overflow, stop_not_retryable" || fail "attempt decision not logged"
       grep '"event":"session_cleanup"' "$d/run.jsonl" | grep -q '"abort":"ok".*"idle":true.*"delete":"ok"' && pass "the failed session was cancelled, confirmed idle and deleted" || fail "session cleanup not confirmed"
       has "$d/report.md" "tokens: unknown" && pass "token usage is reported as unknown, not zero" || fail "usage shown as a number"
@@ -109,8 +114,9 @@ for s in "${scenarios[@]}"; do
       mkdir -p "$work/abandon"
       pj="crl-abandon"
       ( export STUB_MODE=ratelimit_slow COMPOSE_PROFILES=stub MSYS_NO_PATHCONV=1 REVIEW_REPO_DIR=. REVIEW_BASE=x REVIEW_HEAD=y
-        docker compose -p "$pj" -f "$rootn/docker/compose.yml" up -d proxy stub >/dev/null 2>&1
-        docker compose -p "$pj" -f "$rootn/docker/compose.yml" run --rm --no-deps -v "$rootn/tests/integration/abandon-probe.mjs:/probe.mjs:ro" --entrypoint node agent /probe.mjs >"$work/abandon/probe.out" 2>"$work/abandon/probe.err" )
+        docker compose -p "$pj" -f "$rootn/docker/compose.yml" -f "$rootn/docker/compose.offline.yml" build --quiet agent >/dev/null 2>&1   # never run a stale image
+        docker compose -p "$pj" -f "$rootn/docker/compose.yml" -f "$rootn/docker/compose.offline.yml" up -d proxy stub >/dev/null 2>&1
+        docker compose -p "$pj" -f "$rootn/docker/compose.yml" -f "$rootn/docker/compose.offline.yml" run --rm --no-deps -v "$rootn/tests/integration/abandon-probe.mjs:/probe.mjs:ro" --entrypoint node agent /probe.mjs >"$work/abandon/probe.out" 2>"$work/abandon/probe.err" )
       grep -E '"(check|summary)"' "$work/abandon/probe.out" | sed 's/^/    /' | cut -c1-230
       grep -q '"summary":"ABANDON PROBE","failures":0' "$work/abandon/probe.out" && pass "abandoned attempt leaves no session; replacement never overlaps" || fail "abandon probe reported failures"
       ;;
@@ -148,6 +154,134 @@ for s in "${scenarios[@]}"; do
       has "$d/report.md" "model_step_limit" && pass "failure is named step limit" || fail "failure not named"
       grep '"event":"session_cleanup"' "$d/run.jsonl" | grep -q '"abort":"ok".*"idle":true.*"delete":"ok"' && pass "the session was cancelled, confirmed idle and deleted" || fail "session cleanup not confirmed"
       ;;
+    offline)
+      # Provider-free tests must be unable to spend real tokens, even by mistake.
+      # (a) No live authorization: run.sh refuses before starting anything.
+      ( unset STUB_MODE; export CRL_PROJECT=crl-offline-a; bash "$root/docker/run.sh" --repo . --base x --head y --out-dir "$work/offline-a" >"$work/offline-a.out" 2>&1 ); rc_a=$?
+      [ "$rc_a" = 64 ] && grep -q "not authorized" "$work/offline-a.out" && pass "live mode without CRA_ALLOW_LIVE=1 is refused (exit 64)" || fail "live mode without authorization was not refused (rc=$rc_a)"
+      docker ps -a --format '{{.Names}}' | grep -q '^crl-offline-a' && fail "containers were started" || pass "no container was started"
+      # (b) The accidental-live-call scenario: stub mode, but the shell holds a REAL-looking key and Groq as upstream.
+      make_repo "$work/repo-offline"
+      REALISH="gsk_RealLookingKey0123456789abcdefghijklmnop"
+      ( export STUB_MODE=report CRL_PROJECT=crl-offline-b GROQ_API_KEY="$REALISH" UPSTREAM_URL="https://api.groq.com" REVIEW_AGENTS=security
+        bash "$root/docker/run.sh" --repo "$work/repo-offline" --base "$BASE" --head "$HEAD" --out-dir "$work/offline-b" --keep >"$work/offline-b.out" 2>"$work/offline-b.err" ); rc_b=$?
+      [ "$rc_b" != 0 ] && pass "stub mode with a real-looking key and the Groq upstream did not produce a review (exit $rc_b)" || fail "the review ran"
+      grep -q "FATAL: stub mode accepts only the dummy test key" "$work/offline-b/proxy.log" && pass "the proxy refused to start with a real credential in stub mode" || fail "proxy did not refuse the credential"
+      [ "$(grep -c '"event":"request"' "$work/offline-b/stub.log" 2>/dev/null || true)" = 0 ] && pass "the stub saw no request" || fail "a request reached the stub"
+      grep -rqF -- "$REALISH" "$work/offline-b" && fail "the credential appears in the outputs" || pass "the credential appears in no output"
+      # (c) Even a correctly configured stub-mode proxy has no route to the internet.
+      ( export STUB_MODE=obey CRL_PROJECT=crl-offline-c; export COMPOSE_PROFILES=stub MSYS_NO_PATHCONV=1 REVIEW_REPO_DIR=. REVIEW_BASE=x REVIEW_HEAD=y
+        docker compose -p crl-offline-c -f "$rootn/docker/compose.yml" -f "$rootn/docker/compose.offline.yml" up -d proxy stub >/dev/null 2>&1
+        docker compose -p crl-offline-c -f "$rootn/docker/compose.yml" -f "$rootn/docker/compose.offline.yml" exec -T proxy node -e '
+          const t = (u) => fetch(u, { signal: AbortSignal.timeout(6000) }).then(() => "REACHED " + u, (e) => "blocked " + u + " " + (e.cause?.code ?? e.name));
+          Promise.all([t("https://api.groq.com/openai/v1/models"), t("https://example.com"), t("http://1.1.1.1")]).then((r) => console.log(r.join(" | ")));' >"$work/offline-c.out" 2>&1
+        docker compose -p crl-offline-c -f "$rootn/docker/compose.yml" -f "$rootn/docker/compose.offline.yml" down -v >/dev/null 2>&1 )
+      cat "$work/offline-c.out" | sed 's/^/    /'
+      [ "$(grep -o 'blocked' "$work/offline-c.out" | wc -l)" = 3 ] && ! grep -q REACHED "$work/offline-c.out" && pass "the proxy in stub mode cannot reach api.groq.com, example.com or a raw IP" || fail "an external host was reachable from the stub-mode proxy"
+      teardown offline-b
+      ;;
+    workload)
+      # The scripted bounded-reading workload through the real pipeline: page through a 700-line unchanged file, grep
+      # across files, read an unchanged consumer. Prints the size of every model request.
+      make_repo "$work/repo-workload" BIGFILE=1
+      run_case workload workload "$work/repo-workload" REVIEW_AGENTS=security
+      d="$work/workload"
+      echo "  exit=$(rc workload)"
+      echo "  model request sizes (bytes, in order; tool-enabled requests only):"
+      grep '"event":"request"' "$d/proxy.log" | grep '"has_tools":true' | grep -o '"bytes":[0-9]*' | cut -d: -f2 | paste -sd' ' - | sed 's/^/    /'; echo
+      [ "$(rc workload)" = 0 ] && pass "the review completed" || fail "exit code $(rc workload)"
+      done_n=$(grep '"event":"tool_call"' "$d/run.jsonl" | grep -c '"tool":"cra_[a-z]*","status":"completed"')
+      [ "$done_n" = 4 ] && pass "all 4 scripted cra_* calls completed" || fail "completed cra_* calls: $done_n"
+      max=$(grep '"event":"request"' "$d/proxy.log" | grep '"has_tools":true' | grep -o '"bytes":[0-9]*' | cut -d: -f2 | sort -n | tail -1)
+      [ "${max:-999999}" -lt 40000 ] && pass "largest tool-enabled request is $max bytes (< 40000)" || fail "largest request $max bytes"
+      has "$d/requests.jsonl" "ORDER_LINE_100 " && pass "the first chunk (lines up to 100) reached the model" || fail "first chunk missing"
+      has "$d/requests.jsonl" "ORDER_LINE_150 " && pass "the continuation chunk (offset 101) reached the model" || fail "continuation missing"
+      has "$d/requests.jsonl" "TRUNCATED" && pass "the truncation marker with a continuation offset reached the model" || fail "no truncation marker"
+      has "$d/requests.jsonl" "ORDER_LINE_650 " && fail "the whole file reached the model" || pass "the rest of the large file never reached the model"
+      has "$d/requests.jsonl" "orders.ts:401:" && has "$d/requests.jsonl" "lookupForReport" && pass "cross-file grep found callers and the unchanged consumer was read" || fail "grep/consumer content missing"
+      ;;
+    budget)
+      # A model that keeps investigating until the proxy's request budget (3) is spent. Observe how OpenCode 1.19.5
+      # handles the proxy's answer, then check CRA ends the review incomplete without retrying.
+      make_repo "$work/repo-budget"
+      run_case budget loop "$work/repo-budget" REVIEW_AGENTS=code_quality REVIEW_INVESTIGATION_STEPS=20 PROXY_MAX_REQUESTS=3
+      d="$work/budget"
+      echo "  exit=$(rc budget)"; sed -n '1,12p' "$d/report.md" | sed 's/^/    /'
+      grep -E '"event":"(attempt_failed|reviewer_failed|attempt_start|session_cleanup)"' "$d/run.jsonl" | sed 's/"ts":"[^"]*",//' | cut -c1-260 | sed 's/^/    /'
+      [ "$(rc budget)" = 2 ] && pass "exit 2" || fail "exit code $(rc budget), expected 2"
+      has "$d/report.md" "Verdict: not_determined" && pass "verdict is not_determined" || fail "wrong verdict"
+      has "$d/report.md" "model_budget" && pass "failure is named budget" || fail "failure not named"
+      grep '"event":"attempt_failed"' "$d/run.jsonl" | grep -q '"kind":"budget".*"decision":"stop_not_retryable"' && pass "decision logged: budget, stop_not_retryable" || fail "attempt decision not logged"
+      [ "$(grep -c '"event":"request"' "$d/proxy.log")" = 3 ] && pass "exactly 3 requests were forwarded upstream" || fail "forwarded request count is not 3"
+      [ "$(grep -c '"event":"budget_exhausted"' "$d/proxy.log")" = 1 ] && pass "exactly 1 request was refused: OpenCode did not retry it" || fail "refused request count is not 1"
+      [ "$(grep -c '"event":"attempt_start"' "$d/run.jsonl")" = 1 ] && pass "no retry or fallback attempt" || fail "extra attempts"
+      grep -q 'compaction' "$d/stub.log" && fail "a compaction request was made" || pass "no compaction request"
+      grep '"event":"session_cleanup"' "$d/run.jsonl" | grep -q '"abort":"ok".*"idle":true.*"delete":"ok"' && pass "the session was cancelled, confirmed idle and deleted" || fail "session cleanup incomplete"
+      ;;
+    budget_stubborn)
+      # The worst case: a model that ignores the step instruction, with the step cap raised out of reach (50). Only the
+      # proxy's request budget (6) stands between the model and an unbounded number of provider requests.
+      make_repo "$work/repo-budget-stubborn"
+      run_case budget_stubborn loop_stubborn "$work/repo-budget-stubborn" REVIEW_AGENTS=code_quality REVIEW_INVESTIGATION_STEPS=50 PROXY_MAX_REQUESTS=6
+      d="$work/budget_stubborn"
+      echo "  exit=$(rc budget_stubborn)"
+      [ "$(rc budget_stubborn)" = 2 ] && pass "exit 2" || fail "exit code $(rc budget_stubborn), expected 2"
+      has "$d/report.md" "Verdict: not_determined" && pass "verdict is not_determined" || fail "wrong verdict"
+      [ "$(grep -c '"event":"request"' "$d/proxy.log")" = 6 ] && pass "exactly 6 requests reached the provider side (the budget), however long the model wanted to go" || fail "forwarded requests: $(grep -c '"event":"request"' "$d/proxy.log")"
+      [ "$(grep -c '"event":"budget_exhausted"' "$d/proxy.log")" = 1 ] && pass "exactly 1 further request was refused, and OpenCode did not retry it" || fail "refused count: $(grep -c '"event":"budget_exhausted"' "$d/proxy.log")"
+      [ "$(grep -c '"event":"attempt_start"' "$d/run.jsonl")" = 1 ] && pass "no retry or fallback attempt" || fail "extra attempts"
+      grep '"event":"session_cleanup"' "$d/run.jsonl" | grep -q '"abort":"ok".*"idle":true.*"delete":"ok"' && pass "the session was cancelled, confirmed idle and deleted" || fail "session cleanup incomplete"
+      ;;
+    mcpdown)
+      # CRA's MCP server cannot start. The review must end incomplete; OpenCode's unbounded built-ins are never a fallback.
+      make_repo "$work/repo-mcpdown"
+      run_case mcpdown report "$work/repo-mcpdown" REVIEW_AGENTS=security "CRL_COMPOSE_EXTRA=$rootn/tests/integration/compose.mcpdown.yml"
+      d="$work/mcpdown"
+      echo "  exit=$(rc mcpdown)"; sed -n '1,12p' "$d/report.md" | sed 's/^/    /'
+      [ "$(rc mcpdown)" = 2 ] && pass "exit 2" || fail "exit code $(rc mcpdown), expected 2"
+      has "$d/report.md" "Verdict: not_determined" && pass "verdict is not_determined" || fail "wrong verdict"
+      has "$d/report.md" "model_tooling" && pass "failure is named tooling" || fail "failure not named"
+      grep '"event":"attempt_failed"' "$d/run.jsonl" | grep -q '"kind":"tooling".*"decision":"stop_not_retryable"' && pass "decision logged: tooling, stop_not_retryable" || fail "attempt decision not logged"
+      tool_requests=$(grep -c '"toolNames"' "$d/stub.log" 2>/dev/null); tool_requests=${tool_requests:-0}
+      [ "$tool_requests" = 0 ] && pass "no tool-enabled model request was made (no fallback to built-ins)" || fail "$tool_requests tool-enabled request(s) reached the model"
+      ;;
+    hostile)
+      # A repository that tries to run code and to gain system-prompt authority through agent configuration.
+      # Part 1: probes inside the agent container. The CONTROL run (project config on, what CRA did before) must be
+      # compromised, or the test proves nothing; the PROTECTED run (CRA's launch) must be untouched.
+      pj="crl-hostileprobe"; mkdir -p "$work/hostile-probe"
+      ( export STUB_MODE=obey COMPOSE_PROFILES=stub MSYS_NO_PATHCONV=1 REVIEW_REPO_DIR=. REVIEW_BASE=x REVIEW_HEAD=y
+        docker compose -p "$pj" -f "$rootn/docker/compose.yml" -f "$rootn/docker/compose.offline.yml" build --quiet agent >/dev/null 2>&1   # never run a stale image
+        docker compose -p "$pj" -f "$rootn/docker/compose.yml" -f "$rootn/docker/compose.offline.yml" up -d proxy stub >/dev/null 2>&1
+        for mode in 1 0; do
+          docker compose -p "$pj" -f "$rootn/docker/compose.yml" -f "$rootn/docker/compose.offline.yml" run --rm --no-deps -e CONTROL=$mode -v "$rootn/tests/integration:/probe:ro" --entrypoint node agent /probe/hostile-probe.mjs >"$work/hostile-probe/probe$mode.out" 2>"$work/hostile-probe/probe$mode.err"
+          docker compose -p "$pj" -f "$rootn/docker/compose.yml" -f "$rootn/docker/compose.offline.yml" logs --no-log-prefix stub >"$work/hostile-probe/stub$mode.log" 2>&1
+        done )
+      c="$work/hostile-probe/probe1.out"; p="$work/hostile-probe/probe0.out"
+      echo "  control (project config ON):"; grep '"fact":"result"' "$c" | cut -c1-260 | sed 's/^/    /'
+      echo "  protected (CRA launch):";      grep '"fact":"result"' "$p" | cut -c1-260 | sed 's/^/    /'
+      for k in plugin tool mcp; do has "$c" "PWNED_$k" && pass "control: hostile $k ran (the fixture is potent)" || fail "control: hostile $k did not run, so this test proves nothing"; done
+      has "$c" '"reportForged":true' && pass "control: the hostile code overwrote the report (writable /review/out)" || fail "control: report not forged"
+      has "$c" '"toolIdsContainEvil":true' && pass "control: the repository's own tool was registered" || fail "control: evil tool not registered"
+      has "$work/hostile-probe/stub1.log" 'HOSTILE_AGENTS_MD_MARKER' && pass "control: AGENTS.md reached the model" || fail "control: AGENTS.md did not reach the model"
+      has "$p" '"pwnedMarkers":[]' && pass "protected: no hostile plugin, tool or MCP server executed" || fail "protected: something executed"
+      has "$p" '"reportForged":false' && pass "protected: the report was not touched" || fail "protected: report forged"
+      has "$p" '"toolIdsContainEvil":false' && pass "protected: the repository could not register a tool" || fail "protected: evil tool registered"
+      has "$p" '"mcpServers":["cra"]' && pass "protected: the only MCP server is CRA's own (cra); no repository server was started" || fail "protected: unexpected MCP servers"
+      n=$(tail -n +$(( $(wc -l <"$work/hostile-probe/stub1.log") + 1 )) "$work/hostile-probe/stub0.log" | grep -c 'HOSTILE_' || true); [ "$n" = 0 ] && pass "protected: no repository instruction text (AGENTS.md, CLAUDE.md, skills, agents, commands) reached the model" || fail "protected: $n model request(s) carried repository instruction text"
+      COMPOSE_PROFILES=stub REVIEW_REPO_DIR=. REVIEW_BASE=x REVIEW_HEAD=y docker compose -p "$pj" -f "$rootn/docker/compose.yml" -f "$rootn/docker/compose.offline.yml" down -v >/dev/null 2>&1
+      # Part 2: the whole pipeline on a hostile repository. The snapshot must not contain the agent configuration.
+      make_repo "$work/repo-hostile" HOSTILE=1
+      run_case hostile report "$work/repo-hostile" REVIEW_AGENTS=security
+      d="$work/hostile"
+      echo "  exit=$(rc hostile)"; sed -n '1,10p' "$d/report.md" | sed 's/^/    /'
+      [ "$(rc hostile)" = 0 ] && has "$d/report.md" '`src/users.ts:4`' && pass "the review still completes and finds the seeded bug" || fail "review did not complete normally (exit $(rc hostile))"
+      has "$d/report.md" "FORGED" && fail "the report was forged" || pass "the report was not forged"
+      ls "$d" | grep -q '^PWNED_' && fail "a hostile payload wrote into /review/out" || pass "no hostile payload wrote into /review/out"
+      n=$(grep -c 'HOSTILE_' "$d/requests.jsonl" 2>/dev/null); [ "$n" = 0 ] && pass "no repository instruction text reached any model request" || fail "$n model request(s) carried repository instruction text"
+      snap=$(MSYS_NO_PATHCONV=1 docker run --rm -v "crl-hostile_repo_ws:/repo:ro" --entrypoint sh "crl-hostile-agent" -c 'ls -A /repo; ls -A /repo/.claude /repo/.agents 2>/dev/null' 2>&1)
+      echo "$snap" | grep -qE '^\.opencode$|^opencode\.jsonc?$' && fail "the snapshot contains agent configuration: $snap" || pass "the sanitised snapshot excludes .opencode/, opencode.json and opencode.jsonc"
+      ;;
     error)
       make_repo "$work/repo-error"
       run_case error error "$work/repo-error" REVIEW_AGENTS=security
@@ -162,7 +296,7 @@ for s in "${scenarios[@]}"; do
   # OS-level probe inside an agent container with this scenario's real mounts, network and limits.
   if [ "$s" = report ]; then
     echo "  -- container probe"
-    probe_out=$(COMPOSE_PROFILES=stub MSYS_NO_PATHCONV=1 REVIEW_REPO_DIR=. REVIEW_BASE=x REVIEW_HEAD=y docker compose -p "crl-$s" -f "$rootn/docker/compose.yml" run --rm --no-deps -v "$rootn/tests/integration/probe-agent.sh:/probe.sh:ro" agent sh /probe.sh 2>&1)
+    probe_out=$(COMPOSE_PROFILES=stub MSYS_NO_PATHCONV=1 REVIEW_REPO_DIR=. REVIEW_BASE=x REVIEW_HEAD=y docker compose -p "crl-$s" -f "$rootn/docker/compose.yml" -f "$rootn/docker/compose.offline.yml" run --rm --no-deps -v "$rootn/tests/integration/probe-agent.sh:/probe.sh:ro" agent sh /probe.sh 2>&1)
     echo "$probe_out" | grep -E "PROBE (PASS|FAIL|SUMMARY)" | sed 's/^/    /'
     echo "$probe_out" | grep -q "PROBE SUMMARY failures=0" && pass "all container probe checks passed" || { fail "container probe reported failures"; echo "$probe_out" | head -12 | cut -c1-200 | sed "s/^/    | /"; }
   fi

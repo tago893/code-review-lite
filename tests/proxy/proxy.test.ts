@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 // Runs the real docker/proxy/server.mjs against a local fake provider. No network, no real key.
-const KEY = "gsk_" + "PROXYTESTKEY0123456789abcdef";
+const KEY = "gsk_" + "STUBKEY_PROXYTEST0123456789abcdef";
 const SERVER = fileURLToPath(new URL("../../docker/proxy/server.mjs", import.meta.url));
 
 interface Upstream {
@@ -30,11 +30,11 @@ let proc: ChildProcess | undefined;
 let lines: Record<string, unknown>[] = [];
 let up: Upstream | undefined;
 
-async function startProxy(handler: (req: http.IncomingMessage, res: http.ServerResponse) => void): Promise<number> {
+async function startProxy(handler: (req: http.IncomingMessage, res: http.ServerResponse) => void, extraEnv: Record<string, string> = {}): Promise<number> {
   up = await upstream(handler);
   const port = 20000 + Math.floor(Math.random() * 20000);
   lines = [];
-  proc = spawn(process.execPath, [SERVER], { env: { PATH: process.env["PATH"] ?? "", GROQ_API_KEY: KEY, UPSTREAM_URL: `http://127.0.0.1:${up.port}`, PROXY_PORT: String(port) } });
+  proc = spawn(process.execPath, [SERVER], { env: { PATH: process.env["PATH"] ?? "", GROQ_API_KEY: KEY, UPSTREAM_URL: `http://127.0.0.1:${up.port}`, PROXY_PORT: String(port), PROXY_MODE: "stub", ...extraEnv } });
   let buffer = "";
   proc.stdout?.on("data", (chunk: Buffer) => {
     buffer += chunk.toString();
@@ -148,5 +148,74 @@ describe("credential proxy: request correlation and rate-limit metadata", () => 
     const reply = await post(port, "/openai/v1/files", {});
     expect(reply.status).toBe(403);
     expect(up?.seenAuth).toEqual([]);
+  });
+});
+
+describe("credential proxy: hard request budget", () => {
+  const ok = (_req: http.IncomingMessage, res: http.ServerResponse): void => { res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); };
+
+  it("forwards exactly PROXY_MAX_REQUESTS requests, then answers 403 request_budget_exhausted without forwarding", async () => {
+    const port = await startProxy(ok, { PROXY_MAX_REQUESTS: "3" });
+    const statuses: number[] = [];
+    for (let i = 0; i < 5; i++) statuses.push((await post(port, "/openai/v1/chat/completions", chat)).status);
+    expect(statuses).toEqual([200, 200, 200, 403, 403]);
+    expect(up?.seenAuth).toHaveLength(3);
+    const last = await post(port, "/openai/v1/chat/completions", chat);
+    expect(JSON.parse(last.text)).toEqual({ error: { type: "cra_budget", code: "request_budget_exhausted", message: "CRA provider request budget exhausted" } });
+    expect(events("budget_exhausted")).toHaveLength(3);
+    expect(events("budget_exhausted")[0]).toMatchObject({ used: 3, max: 3 });
+    expect(events("request")[2]).toMatchObject({ budgetUsed: 3, budgetMax: 3 });
+  });
+
+  it("does not overshoot under concurrency", async () => {
+    const port = await startProxy((_req, res) => { setTimeout(() => { res.writeHead(200); res.end("{}"); }, 50); }, { PROXY_MAX_REQUESTS: "4" });
+    const replies = await Promise.all(Array.from({ length: 12 }, () => post(port, "/openai/v1/chat/completions", chat)));
+    expect(replies.filter((r) => r.status === 200)).toHaveLength(4);
+    expect(replies.filter((r) => r.status === 403)).toHaveLength(8);
+    expect(up?.seenAuth).toHaveLength(4);
+  });
+
+  it("does not count allow-list refusals against the budget", async () => {
+    const port = await startProxy(ok, { PROXY_MAX_REQUESTS: "2" });
+    await post(port, "/openai/v1/files", {});
+    await post(port, "/openai/v1/chat/completions", chat);
+    await post(port, "/openai/v1/chat/completions", chat);
+    expect((await post(port, "/openai/v1/chat/completions", chat)).status).toBe(403);
+    expect(up?.seenAuth).toHaveLength(2);
+  });
+
+  it("has a default budget and refuses to start with an invalid one", async () => {
+    await startProxy(ok);
+    expect(lines.find((l) => l["event"] === "listening")).toMatchObject({ budget_max: 200 });
+    proc?.kill();
+    for (const bad of ["0", "-1", "abc", "1.5", "99999999"]) {
+      const child = spawn(process.execPath, [SERVER], { env: { PATH: process.env["PATH"] ?? "", GROQ_API_KEY: KEY, UPSTREAM_URL: "http://127.0.0.1:1", PROXY_MODE: "stub", PROXY_MAX_REQUESTS: bad } });
+      const code = await new Promise<number | null>((resolve) => child.on("exit", resolve));
+      expect(code, bad).toBe(1);
+    }
+  });
+});
+
+describe("credential proxy: fails closed on mode, upstream and credential", () => {
+  const REAL = "gsk_" + "RealLookingKey0123456789abcdefghijklmnop";
+  const base = { PATH: process.env["PATH"] ?? "" };
+  const refuses = async (env: Record<string, string>, expected: RegExp): Promise<void> => {
+    const child = spawn(process.execPath, [SERVER], { env: { ...base, ...env } });
+    let stderr = "";
+    child.stderr?.on("data", (c: Buffer) => { stderr += c.toString(); });
+    const code = await new Promise<number | null>((resolve) => child.on("exit", resolve));
+    expect(code).toBe(1);
+    expect(stderr).toMatch(expected);
+    expect(stderr).not.toContain(REAL);
+  };
+
+  it("has no default upstream", async () => { await refuses({ GROQ_API_KEY: KEY, PROXY_MODE: "stub" }, /UPSTREAM_URL is required/); });
+  it("needs an explicit mode", async () => { await refuses({ GROQ_API_KEY: KEY, UPSTREAM_URL: "http://stub:9000" }, /PROXY_MODE must be stub or live/); });
+  it("stub mode rejects a real-looking credential", async () => { await refuses({ GROQ_API_KEY: REAL, UPSTREAM_URL: "http://stub:9000", PROXY_MODE: "stub" }, /dummy test key/); });
+  it("stub mode rejects the real provider as upstream", async () => { await refuses({ GROQ_API_KEY: KEY, UPSTREAM_URL: "https://api.groq.com", PROXY_MODE: "stub" }, /must not point at the real provider/); });
+  it("live mode needs explicit authorization", async () => { await refuses({ GROQ_API_KEY: REAL, UPSTREAM_URL: "https://api.groq.com", PROXY_MODE: "live" }, /explicit authorization/); });
+  it("live mode rejects the dummy key and any other upstream", async () => {
+    await refuses({ GROQ_API_KEY: KEY, UPSTREAM_URL: "https://api.groq.com", PROXY_MODE: "live", PROXY_ALLOW_LIVE: "1" }, /dummy test key/);
+    await refuses({ GROQ_API_KEY: REAL, UPSTREAM_URL: "http://stub:9000", PROXY_MODE: "live", PROXY_ALLOW_LIVE: "1" }, /only talks to https:\/\/api\.groq\.com/);
   });
 });

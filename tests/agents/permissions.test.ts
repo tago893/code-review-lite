@@ -11,19 +11,20 @@ describe("buildAgentPermissions", () => {
     },
   );
 
-  it("allows exactly read, grep, glob and list", () => {
-    const candidates = ["read", "grep", "glob", "list", "edit", "write", "patch", "bash", "webfetch", "task", "x", "*"];
-    expect(candidates.filter((tool) => p.isAllowed(tool)).sort()).toEqual(["glob", "grep", "list", "read"]);
-    expect([...p.allowedTools].sort()).toEqual(["glob", "grep", "list", "read"]);
+  it("allows exactly the four bounded MCP tools and denies OpenCode's own read, grep, glob and list", () => {
+    const candidates = ["cra_read", "cra_grep", "cra_glob", "cra_list", "read", "grep", "glob", "list", "edit", "write", "patch", "bash", "webfetch", "task", "cra_write", "cra_bash", "x", "*"];
+    expect(candidates.filter((tool) => p.isAllowed(tool)).sort()).toEqual(["cra_glob", "cra_grep", "cra_list", "cra_read"]);
+    expect([...p.allowedTools].sort()).toEqual(["cra_glob", "cra_grep", "cra_list", "cra_read"]);
   });
 
   it("denies by default and fences everything outside the workspace except the sanitised context", () => {
     expect(p.permission["*"]).toBe("deny");
-    expect(p.permission["external_directory"]).toEqual({ "*": "deny", "/review/context/**": "allow" });
+    expect(p.permission["external_directory"]).toEqual({ "*": "deny" });
   });
 
-  it("denies reading env files even inside the workspace", () => {
-    expect(p.permission["read"]).toMatchObject({ "*.env": "deny", "*.env.*": "deny" });
+  it("denies the built-in read tool outright; env files are withheld by the bounded cra_read tool instead", () => {
+    expect(p.permission["read"]).toBe("deny");
+    expect(p.permission["cra_read"]).toBe("allow");
   });
 
   it("is frozen and carries the repo root", () => {

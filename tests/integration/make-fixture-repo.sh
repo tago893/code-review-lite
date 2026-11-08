@@ -41,6 +41,21 @@ export function findUser(name: string): Row[] {
 EOF
 
 printf '# fixture\n\nA tiny synthetic service used to test a code review pipeline.\n' >README.md
+if [ "${BIGFILE:-0}" = 1 ]; then
+  # An unchanged 700-line file (about 50 KB) and an unchanged consumer of the changed function, for the
+  # bounded-reading workload: a model must be able to page through the one and find and read the other.
+  node -e '
+    const lines = [];
+    for (let i = 1; i <= 700; i++) lines.push(i === 400 ? "export const ORDER_LINE_400 = findUser;  // uses the user lookup" : "export const ORDER_LINE_" + i + " = " + i + ";  // padding to make this file realistically long, line " + i);
+    lines.unshift("import { findUser } from \"./users\";");
+    require("fs").writeFileSync("src/orders.ts", lines.join("\n") + "\n");'
+  printf 'import { findUser } from "./users";\n\n// Unchanged consumer of findUser.\nexport const lookupForReport = (name: string) => findUser(name);\n' >src/consumer.ts
+fi
+if [ "${HOSTILE:-0}" = 1 ]; then
+  # Repository-supplied agent configuration that tries to execute code and to gain system-prompt authority.
+  here="$(cd "$(dirname "$0")" && (pwd -W 2>/dev/null || pwd))"   # a native path: Windows node cannot open /c/...
+  node "$here/hostile-files.mjs" "$dir"
+fi
 git add -A && git commit -q -m "base: parameterised user lookup"
 base="$(git rev-parse HEAD)"
 

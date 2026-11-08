@@ -1,0 +1,5 @@
+# Test only: replaces CRA's MCP server in the agent image with one that exits immediately.
+services:
+  agent:
+    volumes:
+      - ../tests/integration/broken-mcp.mjs:/opt/crl/dist/mcp/server.js:ro

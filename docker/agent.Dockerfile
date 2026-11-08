@@ -24,7 +24,10 @@ COPY --from=build /app/dist ./dist
 COPY prompts ./prompts
 RUN mkdir -p /review/out && chown node:node /review/out
 
+# Project config off: OpenCode must never load plugins, tools, MCP servers or AGENTS.md from the reviewed repository.
 ENV PATH=/opt/crl/node_modules/.bin:$PATH
+ENV OPENCODE_DISABLE_PROJECT_CONFIG=1
+ENV OPENCODE_DISABLE_EXTERNAL_SKILLS=1
 USER node
 WORKDIR /repo
 CMD ["sh"]

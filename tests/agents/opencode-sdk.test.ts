@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { boundedFetch } from "../../src/agents/opencode-sdk.js";
+import { TRUSTED_OPENCODE_ENV, boundedFetch } from "../../src/agents/opencode-sdk.js";
 import { scrubProviderError } from "../../src/agents/scrub.js";
 import { classifyError } from "../../src/resilience/errors.js";
 
@@ -44,5 +44,12 @@ describe("boundedFetch (per-call transport timeout to the local OpenCode server)
     expect(classifyError(opaque).retryable).toBe(false); // by itself it is unknown...
     // ...which is why the adapter marks it; the marker is what classifyError and scrubbing keep.
     expect(classifyError(Object.assign(opaque, { code: "CRA_TRANSPORT" }))).toMatchObject({ retryable: true, kind: "transport" });
+  });
+});
+
+describe("TRUSTED_OPENCODE_ENV", () => {
+  it("switches off project config and external skills, so a reviewed repository cannot configure the agent", () => {
+    expect(TRUSTED_OPENCODE_ENV).toMatchObject({ OPENCODE_DISABLE_PROJECT_CONFIG: "1", OPENCODE_DISABLE_EXTERNAL_SKILLS: "1" });
+    expect(Object.isFrozen(TRUSTED_OPENCODE_ENV)).toBe(true);
   });
 });

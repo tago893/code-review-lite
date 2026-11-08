@@ -1,14 +1,15 @@
-import { STEP_LIMIT_MARKER, TRANSPORT_MARKER, classifyError, type ErrorKind } from "../resilience/errors.js";
+import { BUDGET_MARKER, STEP_LIMIT_MARKER, TOOLING_MARKER, TRANSPORT_MARKER, classifyError, type ErrorKind } from "../resilience/errors.js";
 
 const STATUS_BY_KIND: Readonly<Partial<Record<ErrorKind, number>>> = {
   rate_limit: 429,
   server: 503,
   auth: 401,
+  budget: 403,
   context_overflow: 413,
 };
 
 // OpenCode reports its own errors as objects with a fixed `name`. Only names from this list are kept (never `data`).
-const SDK_ERROR_NAMES: ReadonlySet<string> = new Set(["APIError", "MessageAbortedError", "MessageOutputLengthError", "ProviderAuthError", "UnknownError", "ContextOverflowError", "RetryBudgetExceeded", "CompactionObserved", "SessionNeverStarted", "TransportTimeoutError", "StepLimitExceeded"]);
+const SDK_ERROR_NAMES: ReadonlySet<string> = new Set(["APIError", "MessageAbortedError", "MessageOutputLengthError", "ProviderAuthError", "UnknownError", "ContextOverflowError", "RetryBudgetExceeded", "CompactionObserved", "SessionNeverStarted", "TransportTimeoutError", "StepLimitExceeded", "ToolsetVerificationFailed"]);
 
 /** Token usage an attempt is known to have consumed. `complete: false` means a lower bound (work was cut short). */
 export interface KnownUsage {
@@ -42,6 +43,8 @@ export function scrubProviderError(err: unknown): Error {
     name,
     ...(classified.kind === "transport" ? { code: TRANSPORT_MARKER } : {}),
     ...(classified.kind === "step_limit" ? { code: STEP_LIMIT_MARKER } : {}),
+    ...(classified.kind === "tooling" ? { code: TOOLING_MARKER } : {}),
+    ...(classified.kind === "budget" ? { code: BUDGET_MARKER } : {}),
     ...(usage ? { usage } : {}),
     ...(typeof sdkName === "string" && SDK_ERROR_NAMES.has(sdkName) ? { sdkName } : {}),
     ...(status === undefined ? {} : { status }),

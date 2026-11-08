@@ -2,7 +2,7 @@
  * "server" is an HTTP 5xx from the provider. "transport" is a failure of one of our own HTTP calls (connection reset,
  * a client-side timeout, "fetch failed"): the provider may never have been reached, and the two must not be confused.
  */
-export type ErrorKind = "rate_limit" | "server" | "transport" | "auth" | "context_overflow" | "step_limit" | "abort" | "unknown";
+export type ErrorKind = "rate_limit" | "server" | "transport" | "auth" | "context_overflow" | "step_limit" | "tooling" | "budget" | "abort" | "unknown";
 
 export interface ErrorClass {
   readonly retryable: boolean;
@@ -18,6 +18,12 @@ export const TRANSPORT_MARKER = "CRA_TRANSPORT";
 
 /** Set on a scrubbed step-limit error so it is still recognised after its original fields are dropped. */
 export const STEP_LIMIT_MARKER = "CRA_STEP_LIMIT";
+/** Set on a scrubbed toolset-verification error: the bounded tools were not available, so the review cannot run. */
+export const TOOLING_MARKER = "CRA_TOOLING";
+/** Set on a scrubbed budget error so it is still recognised after its original fields are dropped. */
+export const BUDGET_MARKER = "CRA_REQUEST_BUDGET";
+/** The error code the proxy answers with (HTTP 403) once its per-run provider request budget is spent. */
+const BUDGET_CODE = "request_budget_exhausted";
 
 const NETWORK_CODES: ReadonlySet<string> = new Set([
   "ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ECONNREFUSED", "EPIPE", "UND_ERR_SOCKET",
@@ -46,6 +52,8 @@ function classify(err: unknown): ErrorClass {
 
   if (name === "AbortError" || name === "TimeoutError" || code === "ABORT_ERR") return result("abort", false);
   if (name === "StepLimitExceeded" || code === STEP_LIMIT_MARKER) return result("step_limit", false);
+  if (name === "ToolsetVerificationFailed" || code === TOOLING_MARKER) return result("tooling", false);
+  if (code === BUDGET_MARKER || isBudgetExhausted(err)) return result("budget", false);
   if (name === "ContextOverflowError" || code === "context_length_exceeded" || status === 413 || CONTEXT_OVERFLOW_MESSAGE.test(message)) return result("context_overflow", false);
   if (status === 401 || status === 403) return result("auth", false);
   if (status === 429) return result("rate_limit", true, retryAfterMs(err, message));
@@ -54,6 +62,14 @@ function classify(err: unknown): ErrorClass {
     return result("transport", true);
   }
   return result("unknown", false);
+}
+
+/** The proxy's budget refusal arrives as an HTTP 403 whose body carries a fixed code; look for it where OpenCode may put it. */
+function isBudgetExhausted(err: unknown): boolean {
+  if (statusOf(err) !== 403) return false;
+  const data = get(err, "data");
+  return [get(err, "message"), get(data, "message"), get(data, "responseBody"), get(err, "responseBody"), get(get(err, "response"), "body")]
+    .some((field) => typeof field === "string" && field.includes(BUDGET_CODE));
 }
 
 function result(kind: ErrorKind, retryable: boolean, retryAfter?: number): ErrorClass {

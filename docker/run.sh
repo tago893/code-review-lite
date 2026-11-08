@@ -19,6 +19,18 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$repo" ] && [ -n "$base" ] && [ -n "$head" ] || usage
 [ -n "${GROQ_API_KEY:-}" ] || { echo "GROQ_API_KEY is not set" >&2; exit 64; }
+# Two modes, never inferred from the key. STUB_MODE set: a scripted provider on a network with no route out; the proxy
+# accepts only the dummy key. STUB_MODE unset: the real provider, which needs CRA_ALLOW_LIVE=1 and UPSTREAM_URL set
+# to https://api.groq.com on purpose. The proxy enforces the same rules again (docker/proxy/server.mjs).
+if [ -n "${STUB_MODE:-}" ]; then
+  export PROXY_MODE=stub
+  [ -n "${UPSTREAM_URL:-}" ] || { echo "UPSTREAM_URL is required (stub mode: the stub's address)" >&2; exit 64; }
+else
+  export PROXY_MODE=live
+  [ "${CRA_ALLOW_LIVE:-}" = 1 ] || { echo "live provider calls are not authorized: set CRA_ALLOW_LIVE=1 to allow them" >&2; exit 64; }
+  [ -n "${UPSTREAM_URL:-}" ] || { echo "UPSTREAM_URL is required (live mode: https://api.groq.com)" >&2; exit 64; }
+  export PROXY_ALLOW_LIVE=1
+fi
 
 native() { (cd "$1" && (pwd -W 2>/dev/null || pwd)); }
 here="$(native "$(dirname "$0")")"
@@ -27,7 +39,11 @@ export REVIEW_REPO_DIR; REVIEW_REPO_DIR="$(native "$repo")"
 export REVIEW_BASE="$base" REVIEW_HEAD="$head"
 project="${CRL_PROJECT:-crl}"
 [ -n "${STUB_MODE:-}" ] && export COMPOSE_PROFILES=stub
-compose() { docker compose -p "$project" -f "$here/compose.yml" "$@"; }
+# CRL_COMPOSE_EXTRA: an extra compose file, for tests only (see tests/integration/compose.mcpdown.yml).
+files=(-f "$here/compose.yml")
+[ -n "${STUB_MODE:-}" ] && files+=(-f "$here/compose.offline.yml")
+[ -n "${CRL_COMPOSE_EXTRA:-}" ] && files+=(-f "$CRL_COMPOSE_EXTRA")
+compose() { docker compose -p "$project" "${files[@]}" "$@"; }
 
 mkdir -p "$out_dir"
 out_dir="$(native "$out_dir")"

@@ -6,29 +6,65 @@
 //   Every request gets an opaque id (rid) shared by its request, upstream and response_end events. Provider rate-limit
 //   headers and the numbers in a 4xx error (limit window, limit, used, requested) are logged after strict validation;
 //   provider error text, request bodies and the key never are.
+// - A hard budget on outbound provider requests per proxy lifetime (one review run): PROXY_MAX_REQUESTS. Every request
+//   forwarded upstream counts, including each retry OpenCode makes on its own. When the budget is spent the proxy
+//   answers 403 with the error code "request_budget_exhausted" and forwards nothing. 403 is not retried by OpenCode and
+//   does not look like a context overflow, so it can neither loop nor trigger compaction.
 //   With PROXY_LOG_BODIES=1 (tests only) request bodies are also appended to /logs/requests.jsonl so a test can
 //   check exactly what reached the model. Never enable that for real repositories.
 import http from "node:http";
 import https from "node:https";
 import { appendFileSync } from "node:fs";
 
-const KEY = process.env.GROQ_API_KEY;
-if (!KEY) {
-  process.stderr.write("FATAL: GROQ_API_KEY is missing\n");
+const fatal = (message) => {
+  process.stderr.write(`FATAL: ${message}\n`);
   process.exit(1);
-}
+};
 
-const upstream = new URL(process.env.UPSTREAM_URL ?? "https://api.groq.com");
+const KEY = process.env.GROQ_API_KEY;
+if (!KEY) fatal("GROQ_API_KEY is missing");
+
+// Fail closed: the proxy never picks an upstream or a mode for itself.
+//   PROXY_MODE=stub  a scripted test provider: the key must be the recognisable dummy and the upstream must not be Groq.
+//   PROXY_MODE=live  the real provider: needs PROXY_ALLOW_LIVE=1, the real host over https, and a non-dummy key.
+const STUB_KEY_PREFIX = "gsk_STUBKEY";
+const LIVE_HOST = "api.groq.com";
+if (!process.env.UPSTREAM_URL) fatal("UPSTREAM_URL is required (there is no default upstream)");
+let upstream;
+try { upstream = new URL(process.env.UPSTREAM_URL); } catch { fatal("UPSTREAM_URL is not a valid URL"); }
+const MODE = process.env.PROXY_MODE;
+if (MODE === "stub") {
+  if (!KEY.startsWith(STUB_KEY_PREFIX)) fatal("stub mode accepts only the dummy test key; a real credential was refused");
+  if (upstream.hostname === LIVE_HOST || upstream.hostname.endsWith(".groq.com")) fatal("stub mode must not point at the real provider");
+} else if (MODE === "live") {
+  if (process.env.PROXY_ALLOW_LIVE !== "1") fatal("live mode needs explicit authorization (PROXY_ALLOW_LIVE=1)");
+  if (KEY.startsWith(STUB_KEY_PREFIX)) fatal("live mode refuses the dummy test key");
+  if (upstream.protocol !== "https:" || upstream.hostname !== LIVE_HOST) fatal(`live mode only talks to https://${LIVE_HOST}`);
+} else {
+  fatal("PROXY_MODE must be stub or live");
+}
 const transport = upstream.protocol === "http:" ? http : https;
 const LOG_BODIES = process.env.PROXY_LOG_BODIES === "1";
 const BODY_LOG = "/logs/requests.jsonl";
 const LISTEN_PORT = Number(process.env.PROXY_PORT ?? 8080);
+const DEFAULT_MAX_REQUESTS = 200;
+const MAX_REQUESTS = parseBudget(process.env.PROXY_MAX_REQUESTS);
+const budget = { used: 0, denied: 0 };
 const MAX_ERROR_CAPTURE = 8192;
 const MAX_BODY = 1_000_000;
 const ALLOW = [
   ["POST", "/openai/v1/chat/completions"],
   ["GET", "/openai/v1/models"],
 ];
+
+function parseBudget(raw) {
+  if (raw === undefined || raw === "") return DEFAULT_MAX_REQUESTS;
+  if (!/^[1-9]\d{0,6}$/.test(raw)) {
+    process.stderr.write("FATAL: PROXY_MAX_REQUESTS must be a positive integer\n");
+    process.exit(1);
+  }
+  return Number(raw);
+}
 
 let counter = 0;
 const nextRid = () => `r${(++counter).toString(16)}`;
@@ -114,9 +150,18 @@ http
         res.end("request too large");
         return;
       }
+      // The check and the increment run in one synchronous step, so concurrent requests cannot overshoot the budget.
+      if (budget.used >= MAX_REQUESTS) {
+        budget.denied += 1;
+        log({ event: "budget_exhausted", rid, method: req.method, path, used: budget.used, max: MAX_REQUESTS, denied: budget.denied });
+        res.writeHead(403, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { type: "cra_budget", code: "request_budget_exhausted", message: "CRA provider request budget exhausted" } }));
+        return;
+      }
+      budget.used += 1;
       const body = Buffer.concat(chunks);
       const summary = req.method === "POST" ? describeBody(body) : {};
-      log({ event: "request", rid, method: req.method, path, bytes: body.length, inbound_auth_discarded: Boolean(req.headers.authorization), ...summary });
+      log({ event: "request", rid, method: req.method, path, budgetUsed: budget.used, budgetMax: MAX_REQUESTS, bytes: body.length, inbound_auth_discarded: Boolean(req.headers.authorization), ...summary });
       if (LOG_BODIES && req.method === "POST") {
         try { appendFileSync(BODY_LOG, `${JSON.stringify({ t: Date.now(), path, ...summary, body: body.toString("utf8") })}\n`); } catch { /* test aid only */ }
       }
@@ -151,4 +196,4 @@ http
       out.end(body);
     });
   })
-  .listen(LISTEN_PORT, "0.0.0.0", () => log({ event: "listening", port: LISTEN_PORT, upstream_host: upstream.host, log_bodies: LOG_BODIES }));
+  .listen(LISTEN_PORT, "0.0.0.0", () => log({ event: "listening", port: LISTEN_PORT, upstream_host: upstream.host, log_bodies: LOG_BODIES, budget_max: MAX_REQUESTS }));

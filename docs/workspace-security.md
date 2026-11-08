@@ -56,6 +56,17 @@ Known limits:
 - `REVIEW_AGENTS` narrows a run and the report says so; `REVIEW_TIMEOUT_SCALE` (1 to 10) lengthens timeouts. Both exist
   because the 8,000 tokens-per-minute tier cannot finish three reviewers on even a tiny diff.
 - A model that obeys an injection and reports nothing yields `approved`; the pipeline cannot tell a missed bug from a clean diff.
-- Denied tools are mostly not offered to the model at all (OpenCode lists only glob, grep, read); out-of-bounds reads are
-  refused by OpenCode permissions. The mounts remain the primary boundary.
+- File access is a small trusted MCP server (`src/mcp`), registered inline by CRA and started as a child process in the
+  agent container. The model is offered exactly `cra_read`, `cra_grep`, `cra_glob`, `cra_list` (asserted by the `attack`
+  scenario from the tool names in each request); OpenCode's built-in read/grep/glob/list and every other built-in are
+  denied. The server reads only under `/repo` and `/review/context`, rejects `..`, absolute escapes, NUL bytes and every
+  symlink (a path must equal its own realpath), re-applies the snapshot's withheld-name rules, caps lines, bytes,
+  matches and search time, and marks every truncation with the offset to continue from. It never executes repository
+  content (searches are ripgrep with a fixed argument vector). If it is not connected at startup, or OpenCode registers
+  any MCP server or tool CRA did not expect, the review ends incomplete (`model_tooling`, exit 2) and there is no
+  fall back to the built-ins. The mounts remain the primary boundary.
+- OpenCode runs in a fresh empty working directory with `OPENCODE_DISABLE_PROJECT_CONFIG=1`; the snapshot also excludes
+  `.opencode/`, `opencode.json` and `opencode.jsonc`. Measured with 1.19.5: the environment variable alone does NOT stop
+  `.opencode/plugin/*.js` from running, so the working directory is what protects. The `hostile` scenario proves the
+  protection and that its control (project config on) is compromised.
 - Docker Desktop on Windows was the only platform tested. `internal: true` blocked all egress there.

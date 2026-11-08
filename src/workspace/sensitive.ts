@@ -1,12 +1,16 @@
 // Which paths never enter the reviewer workspace, whatever their content. Name-based and deterministic.
+// `.opencode/`, `opencode.json` and `opencode.jsonc` are excluded as defense in depth: OpenCode would load plugins, tools and
+// MCP servers from them. The primary control is that project config is switched off at launch (TRUSTED_OPENCODE_ENV).
 
 /** Directories that are skipped with everything below them. */
-const EXCLUDED_DIRS: ReadonlySet<string> = new Set([".git", ".hg", ".svn", "node_modules", ".ssh", ".gnupg", ".aws"]);
+const EXCLUDED_DIRS: ReadonlySet<string> = new Set([".git", ".hg", ".svn", "node_modules", ".ssh", ".gnupg", ".aws", ".opencode"]);
 
 const EXCLUDED_FILE_NAMES: ReadonlySet<string> = new Set([
   ".npmrc", ".netrc", ".pgpass", ".git-credentials", ".htpasswd", ".dockercfg", "credentials", "credentials.json",
   "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "secrets.json", "secrets.yml", "secrets.yaml", "service-account.json",
   "terraform.tfstate", "terraform.tfstate.backup",
+  // Agent-tool configuration the repository could use to register executable plugins, tools or MCP servers.
+  "opencode.json", "opencode.jsonc",
 ]);
 
 const EXCLUDED_EXTENSIONS = /\.(pem|key|p12|pfx|jks|keystore|kdbx|gpg|asc|tfvars)$/i;

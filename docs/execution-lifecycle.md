@@ -89,6 +89,15 @@ What the cap does, as measured against OpenCode 1.19.5 with a scripted model:
 - Telemetry: `investigation_steps` {`steps`, `stepLimit`, `limitReached`, `outcome`: `finished` | `overrun`}; the
   `reviewer_done` event carries `truncated`.
 
+## Provider request budget
+The proxy counts every request it forwards upstream (including each retry OpenCode makes by itself) against
+`PROXY_MAX_REQUESTS` (default 200, positive integer, otherwise the proxy refuses to start). The check and the increment
+are one synchronous step, so concurrent requests cannot overshoot. The next request is answered with HTTP 403 and the
+code `request_budget_exhausted`, and nothing is forwarded. Measured with OpenCode 1.19.5: it neither retries a 403 nor
+compacts, so exactly one request is refused and the attempt ends. CRA recognises that 403 (status plus code) as kind
+`budget` (non-retryable); the reviewer fails as `model_budget`, the review is `incomplete`, `not_determined`, exit 2.
+The budget is per proxy lifetime, which is one run. It sits on top of the step cap; neither replaces the other.
+
 ## What is logged (all in run.jsonl; nothing here contains source text)
 
 | event | key fields |
