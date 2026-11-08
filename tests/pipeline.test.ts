@@ -69,6 +69,19 @@ function deps(over: Partial<PipelineDeps> & { runner: ReviewerRunner }): Pipelin
 }
 
 describe("runReview", () => {
+  it("returns REVIEW INCOMPLETE / not_determined / exit 2 when the run deadline has expired", async () => {
+    const controller = new AbortController();
+    const { runner } = runnerOf(() => [raw()]);
+    const slow: ReviewerRunner = { run: (req) => new Promise((_, reject) => { req.signal?.addEventListener("abort", () => reject(req.signal?.reason)); setTimeout(() => controller.abort(Object.assign(new Error("deadline"), { name: "TimeoutError" })), 5); }) };
+    void runner;
+    let judged = 0;
+    const result = await runReview(input(DIFF_B), deps({ runner: slow, deadline: controller.signal, judge: async (f, m, s) => { judged += 1; return passThrough(f, m, s); } }));
+    expect(result).toMatchObject({ completion: "incomplete", verdict: "not_determined", exitCode: 2 });
+    expect(result.report).toContain("REVIEW INCOMPLETE");
+    expect(result.report).toContain("run_deadline_exceeded");
+    expect(judged).toBe(0);
+  });
+
   async function noModelCalls(diff: string) {
     const { runner, calls } = runnerOf(() => [raw()]);
     let judged = 0;

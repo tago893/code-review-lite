@@ -26,6 +26,14 @@ const run = (agents: Category[], runner: ReviewerRunner, config = cfg(), metrics
   runReviewers(agents, { runner, config, log: log(), paths, metrics });
 
 describe("runReviewers", () => {
+  it("with maxRetries 0 makes exactly one attempt: no retry and no fallback model", async () => {
+    const models: string[] = [];
+    const runner: ReviewerRunner = { run: async (r) => { models.push(r.model); throw http(503); } };
+    const result = await run(["security"], runner, cfg({ maxRetries: 0 }));
+    expect(models).toEqual(["small"]);
+    expect(result.failed).toHaveLength(1);
+  });
+
   it("collects every reviewer's findings, tagged with the reviewer", async () => {
     const runner: ReviewerRunner = { run: async (r) => out(finding(r.category)) };
     const result = await run(["code_quality", "security", "performance"], runner);
@@ -224,7 +232,7 @@ describe("runReviewers: attempt tracing and usage", () => {
     try {
       let n = 0;
       const runner: ReviewerRunner = { run: async () => { n++; throw http(429, n === 1 ? { usage: { input: 700, output: 20, complete: false } } : {}); } };
-      const pending = run(["security"], runner, cfg({ maxRetries: 0 }));
+      const pending = run(["security"], runner, cfg({ maxRetries: 1, fallbackModel: "small" }));
       await vi.runAllTimersAsync();
       const result = await pending;
       expect(result.failed).toEqual([{ reviewer: "security", error: "models_exhausted", failureClass: "model" }]);

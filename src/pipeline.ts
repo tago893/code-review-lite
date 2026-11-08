@@ -3,7 +3,7 @@ import { runReviewers, type ReviewerPaths } from "./agents/reviewers.js";
 import type { ReviewerRunner } from "./agents/runner.js";
 import { ReviewerSecurityError } from "./agents/runner.js";
 import { assessCompletion } from "./completion.js";
-import type { Config } from "./config.js";
+import { attemptModels, type Config } from "./config.js";
 import { createMetrics, type Metrics, type MetricsSnapshot } from "./observability/metrics.js";
 import { startHeartbeat, type Logger } from "./observability/log.js";
 import type { ReviewPlan } from "./plan.js";
@@ -38,6 +38,8 @@ export interface PipelineDeps {
   readonly now?: () => number;
   /** Upper bound on verifier calls, to protect the shared provider limit. */
   readonly maxVerifierCalls?: number;
+  /** Run-wide hard deadline. Aborted => active work is cancelled and the review ends incomplete (run_deadline_exceeded). */
+  readonly deadline?: AbortSignal;
 }
 
 export interface PipelineResult {
@@ -50,6 +52,7 @@ export interface PipelineResult {
 }
 
 const DEFAULT_MAX_VERIFIER_CALLS = 6;
+const DEADLINE_REASON = "run_deadline_exceeded";
 
 /**
  * Review stage: reviewers, completion, citation check, coordinator, independent confirmation, level caps, verdict,
@@ -72,6 +75,7 @@ async function execute(input: PipelineInput, deps: PipelineDeps, started: number
   const { config, log } = deps;
   let metrics = deps.metrics ?? createMetrics();
   const timedOut = (): boolean => now() - started > config.timeouts.overallMs;
+  const expired = (): boolean => deps.deadline?.aborted === true;
   const finish = (data: Omit<ReportData, "metrics">, m: Metrics): PipelineResult => {
     const final = m.recordCompletion(data.completion).recordDuration(now() - started).snapshot();
     log.event("review_done", { completion: data.completion, verdict: data.verdict, findings: data.findings.length });
@@ -90,10 +94,11 @@ async function execute(input: PipelineInput, deps: PipelineDeps, started: number
   }
 
   log.event("review_start", { tier: plan.tier, agents: plan.agents });
-  const reviewed = await runReviewers(plan.agents, { runner: deps.runner, config, log, paths, metrics });
+  const reviewed = await runReviewers(plan.agents, { runner: deps.runner, config, log, paths, metrics, ...(deps.deadline ? { signal: deps.deadline } : {}) });
   metrics = reviewed.metrics ?? metrics;
   const assessment = assessCompletion(reviewed.outcomes);
   const blockers: string[] = [...assessment.reasons];
+  if (expired()) blockers.push(DEADLINE_REASON);
   const degraded: string[] = [...assessment.degraded, ...(plan.unreviewed.length > 0 ? [`not analysed by any reviewer: ${plan.unreviewed.join(", ")}`] : [])];
 
   // Level 1: every finding must cite real source in the snapshot. Failures are dropped and counted, never shown.
@@ -123,8 +128,9 @@ async function execute(input: PipelineInput, deps: PipelineDeps, started: number
         for (let i = 0; i < judged.duplicates; i++) metrics = metrics.recordDrop("judge");
         if (judged.refuted > 0) degraded.push(`${judged.refuted} finding(s) dropped: refuted by the coordinator`);
       } catch (error) {
-        blockers.push(coordinatorFailure(error));
-        log.event("coordinator_failed", { error: coordinatorFailure(error) });
+        const failure = expired() ? DEADLINE_REASON : coordinatorFailure(error);
+        blockers.push(failure);
+        log.event("coordinator_failed", { error: failure });
       }
     }
   }
@@ -132,9 +138,10 @@ async function execute(input: PipelineInput, deps: PipelineDeps, started: number
   let confirmed = new Set<string>();
   let basis = new Map<string, ConfirmationBasis>();
   if (blockers.length === 0) {
-    const result = await confirm(candidates, deps, input, timedOut);
+    const result = await confirm(candidates, deps, input, () => timedOut() || expired());
     confirmed = result.confirmed;
     basis = result.basis;
+    if (expired()) blockers.push(DEADLINE_REASON);
     if (result.skipped > 0) degraded.push(`${result.skipped} candidate(s) not independently checked (verifier call limit or deadline)`);
   }
 
@@ -151,8 +158,8 @@ async function execute(input: PipelineInput, deps: PipelineDeps, started: number
 
 async function runJudge(findings: readonly Finding[], deps: PipelineDeps): Promise<JudgeResult> {
   const { config } = deps;
-  const models = [...new Set([config.coordinatorModel, config.fallbackModel])];
-  const run = await runWithFallback(models, (model, signal) => deps.judge(findings, model, signal), { timeoutMs: config.timeouts.taskMs, maxRetries: config.maxRetries });
+  const models = attemptModels(config, config.coordinatorModel);
+  const run = await runWithFallback(models, (model, signal) => deps.judge(findings, model, signal), { timeoutMs: config.timeouts.taskMs, maxRetries: config.maxRetries, ...(deps.deadline ? { signal: deps.deadline } : {}) });
   return run.value;
 }
 

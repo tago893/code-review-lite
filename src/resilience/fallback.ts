@@ -31,6 +31,11 @@ export interface FallbackOptions {
    * session) before the run stops waiting for it. Default 15 000.
    */
   readonly abortGraceMs?: number;
+  /**
+   * Run-wide hard deadline. When it aborts, the active attempt's signal is aborted (so it cancels and cleans up, within
+   * abortGraceMs), nothing further is started, and the run throws the signal's reason, which is never retried.
+   */
+  readonly signal?: AbortSignal;
   /** Called for every attempt start, success and failure, so retry and fallback decisions can be logged. */
   readonly onEvent?: (event: AttemptEvent) => void;
 }
@@ -85,12 +90,13 @@ export async function runWithFallback<T>(
     try { opts.onEvent?.(event); } catch { /* observability must never break a review */ }
   };
   const failures: FailedAttempt[] = [];
+  opts.signal?.throwIfAborted();
 
   for (const model of models) {
     for (let tryNo = 0; tryNo <= maxRetries; tryNo++) {
       emit({ type: "start", model, tryNo });
       try {
-        const value = await withTimeout((signal) => attempt(model, signal), opts.timeoutMs, opts.abortGraceMs ?? DEFAULT_ABORT_GRACE_MS);
+        const value = await withTimeout((signal) => attempt(model, signal), opts.timeoutMs, opts.abortGraceMs ?? DEFAULT_ABORT_GRACE_MS, opts.signal);
         emit({ type: "succeeded", model, tryNo });
         return Object.freeze({ value, modelUsed: model, retries: failures.length });
       } catch (error) {
@@ -106,7 +112,7 @@ export async function runWithFallback<T>(
         const decision: RetryDecision = !hasMoreTries ? "exhausted" : tryNo < maxRetries ? "retry_same_model" : "fallback_model";
         const delayMs = hasMoreTries ? delayFor(kind.retryAfterMs, tryNo, opts) : undefined;
         emit({ type: "failed", model, tryNo, kind: kind.kind, decision, ...(delayMs === undefined ? {} : { delayMs }), ...(usage ? { usage } : {}) });
-        if (delayMs !== undefined) await sleep(delayMs);
+        if (delayMs !== undefined) await sleep(delayMs, opts.signal);
       }
     }
   }
@@ -119,23 +125,33 @@ function delayFor(serverMs: number | undefined, tryNo: number, opts: FallbackOpt
   return Math.min(serverMs ?? fallback, cap);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const onAbort = (): void => { clearTimeout(timer); reject(signal?.reason); };
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
-function withTimeout<T>(run: (signal: AbortSignal) => Promise<T>, timeoutMs: number, graceMs: number): Promise<T> {
+function withTimeout<T>(run: (signal: AbortSignal) => Promise<T>, timeoutMs: number, graceMs: number, parent?: AbortSignal): Promise<T> {
   const controller = new AbortController();
   return new Promise<T>((resolve, reject) => {
     let deadline: (Error & { usage?: unknown }) | undefined;
     let graceTimer: NodeJS.Timeout | undefined;
-    const timer = setTimeout(() => {
-      deadline = Object.assign(new Error("attempt timed out"), { name: "TimeoutError" });
-      controller.abort(deadline);
+    const expire = (reason: Error): void => {
+      if (deadline) return;
+      deadline = reason;
+      controller.abort(reason);
       // The attempt owns whatever it started (an OpenCode session). Give it the chance to cancel and clean up.
-      graceTimer = setTimeout(() => reject(deadline), graceMs);
-    }, timeoutMs);
+      graceTimer = setTimeout(() => reject(reason), graceMs);
+    };
+    const timer = setTimeout(() => expire(Object.assign(new Error("attempt timed out"), { name: "TimeoutError" })), timeoutMs);
+    const onParent = (): void => expire(parent?.reason instanceof Error ? parent.reason : Object.assign(new Error("run aborted"), { name: "AbortError" }));
 
-    const finish = (): void => { clearTimeout(timer); if (graceTimer) clearTimeout(graceTimer); };
+    const finish = (): void => { clearTimeout(timer); if (graceTimer) clearTimeout(graceTimer); parent?.removeEventListener("abort", onParent); };
+    parent?.addEventListener("abort", onParent, { once: true });
+    if (parent?.aborted) onParent();
     run(controller.signal).then(
       (value) => {
         finish();

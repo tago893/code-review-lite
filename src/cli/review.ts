@@ -7,6 +7,7 @@ import { createStructuredCall } from "../agents/structured.js";
 import { VERIFIER_SCHEMA, createVerifier } from "../agents/verifier.js";
 import { loadConfig } from "../config.js";
 import { fileSink } from "../io/provider.js";
+import { startDeadline } from "../resilience/deadline.js";
 import { createLogger } from "../observability/log.js";
 import { runReview } from "../pipeline.js";
 import { toWorkspaceError } from "../workspace/errors.js";
@@ -32,6 +33,7 @@ function restrictedAgents(value: string | undefined): readonly string[] | undefi
 export async function review(cmd: Review, env: NodeJS.ProcessEnv, write: (text: string) => void): Promise<{ readonly exitCode: 0 | 2; readonly status: string }> {
   try {
     const config = loadConfig(env);
+    const deadline = startDeadline(config.timeouts.deadlineMs);
     const loaded = await loadReviewContext(cmd.ctx, cmd.repo, cmd.prompts);
     const only = restrictedAgents(env["REVIEW_AGENTS"]);
     const context = only === undefined ? loaded : { ...loaded, plan: { ...loaded.plan, agents: loaded.plan.agents.filter((a) => only.includes(a)) } };
@@ -46,7 +48,7 @@ export async function review(cmd: Review, env: NodeJS.ProcessEnv, write: (text: 
     const result = await runReview(
       { plan: context.plan, meta: context.meta, paths: context.paths, notes },
       {
-        config, log, runner, verifier: createVerifier(verifierStructured, config.verifierModel),
+        config, log, runner, deadline: deadline.signal, verifier: createVerifier(verifierStructured, config.verifierModel, deadline.signal),
         judge: (findings, model, signal) => judge(findings, { sessions, structured: judgeStructured, model, repoRoot: cmd.repo, promptPath: join(cmd.prompts, "coordinator.md"), signal }),
       },
     );

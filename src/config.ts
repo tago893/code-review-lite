@@ -18,6 +18,8 @@ export interface Timeouts {
   readonly taskMs: number;
   readonly codeQualityTaskMs: number;
   readonly overallMs: number;
+  /** Hard run-wide deadline: when it passes, active work is cancelled and the review is incomplete. See REVIEW_DEADLINE_MINUTES. */
+  readonly deadlineMs: number;
   readonly inactivityMs: number;
   readonly heartbeatMs: number;
   /** How long an aborted attempt may take to cancel and delete its OpenCode session before the run stops waiting. */
@@ -108,6 +110,23 @@ function investigationSteps(value: string | undefined): number {
   return parseOrThrow(z.string().regex(/^\d+$/).transform(Number).refine((n) => n >= 1 && n <= 50, "REVIEW_INVESTIGATION_STEPS must be an integer from 1 to 50"), value.trim());
 }
 
+/** REVIEW_MAX_RETRIES: whole-attempt retries per model. 0 to 5, default 2. At 0 an unsuccessful investigation is not restarted and there is no model fallback. */
+function maxRetries(value: string | undefined): number {
+  if (value === undefined || value.trim() === "") return MAX_RETRIES;
+  return parseOrThrow(z.string().regex(/^\d+$/, "REVIEW_MAX_RETRIES must be an integer from 0 to 5").transform(Number).refine((n) => n <= 5, "REVIEW_MAX_RETRIES must be an integer from 0 to 5"), value.trim());
+}
+
+/** REVIEW_DEADLINE_MINUTES: hard run-wide deadline, 1 to 240 minutes. Default is the overall timeout (25 min x scale). */
+function deadlineMs(value: string | undefined, fallbackMs: number): number {
+  if (value === undefined || value.trim() === "") return fallbackMs;
+  return MINUTE_MS * parseOrThrow(z.string().regex(/^\d+$/, "REVIEW_DEADLINE_MINUTES must be an integer from 1 to 240").transform(Number).refine((n) => n >= 1 && n <= 240, "REVIEW_DEADLINE_MINUTES must be an integer from 1 to 240"), value.trim());
+}
+
+/** Models to try, in order: primary then fallback. With no retries allowed there is no fallback either: one attempt. */
+export function attemptModels(config: Pick<Config, "maxRetries" | "fallbackModel">, primary: string): readonly string[] {
+  return config.maxRetries === 0 ? [primary] : [...new Set([primary, config.fallbackModel])];
+}
+
 function sessionRetries(value: string | undefined): number {
   if (value === undefined || value.trim() === "") return 5;
   return parseOrThrow(z.string().regex(/^\d+$/).transform(Number).refine((n) => n >= 1 && n <= 20, "REVIEW_SESSION_RETRIES must be an integer from 1 to 20"), value.trim());
@@ -124,6 +143,7 @@ export function loadConfig(env: Env): Config {
     taskMs: 5 * MINUTE_MS * scale,
     codeQualityTaskMs: 10 * MINUTE_MS * scale,
     overallMs: 25 * MINUTE_MS * scale,
+    deadlineMs: deadlineMs(env["REVIEW_DEADLINE_MINUTES"], 25 * MINUTE_MS * scale),
     inactivityMs: MINUTE_MS,
     heartbeatMs: MINUTE_MS / 2,
     abortGraceMs: MINUTE_MS,
@@ -134,7 +154,7 @@ export function loadConfig(env: Env): Config {
     coordinatorModel: modelFromEnv(env, "COORDINATOR_MODEL", DEFAULT_COORDINATOR_MODEL),
     verifierModel: modelFromEnv(env, "VERIFIER_MODEL", DEFAULT_VERIFIER_MODEL),
     fallbackModel: modelFromEnv(env, "FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL),
-    maxRetries: MAX_RETRIES,
+    maxRetries: maxRetries(env["REVIEW_MAX_RETRIES"]),
     reviewerConcurrency: REVIEWER_CONCURRENCY,
     timeouts,
     session: Object.freeze({

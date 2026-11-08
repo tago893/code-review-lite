@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { Config } from "../config.js";
+import { attemptModels, type Config } from "../config.js";
 import { parseReviewerOutput, type ParsedReviewerOutput } from "../findings/schema.js";
 import type { ReviewerOutcome } from "../completion.js";
 import type { Logger } from "../observability/log.js";
@@ -41,6 +41,8 @@ export interface ReviewerDeps {
   readonly log: Logger;
   readonly paths: ReviewerPaths;
   readonly metrics?: Metrics;
+  /** Run-wide hard deadline; aborting it cancels the active attempt and starts no further ones. */
+  readonly signal?: AbortSignal;
 }
 
 interface OneResult {
@@ -104,7 +106,7 @@ export async function runReviewers(agents: readonly Category[], deps: ReviewerDe
 
 async function runOne(category: Category, deps: ReviewerDeps, gate: RateLimitGate): Promise<OneResult> {
   const { config, log, paths, runner } = deps;
-  const models = [...new Set([config.reviewerModel, config.fallbackModel])];
+  const models = attemptModels(config, config.reviewerModel);
   const timeoutMs = category === "code_quality" ? config.timeouts.codeQualityTaskMs : config.timeouts.taskMs;
   const started = Date.now();
   log.event("reviewer_start", { reviewer: category, models });
@@ -145,7 +147,7 @@ async function runOne(category: Category, deps: ReviewerDeps, gate: RateLimitGat
           throw error instanceof ReviewerSecurityError ? Object.assign(error, { usage: { input: 0, output: 0, complete: true } }) : error;
         }
       },
-      { timeoutMs, maxRetries: config.maxRetries, abortGraceMs: config.timeouts.abortGraceMs, onEvent },
+      { timeoutMs, maxRetries: config.maxRetries, abortGraceMs: config.timeouts.abortGraceMs, onEvent, ...(deps.signal ? { signal: deps.signal } : {}) },
     );
     tally = { ...tallySuccess(tally, run.value), fellBack: run.modelUsed !== models[0] };
     const parsed = parseReviewerOutput(run.value.raw, category);

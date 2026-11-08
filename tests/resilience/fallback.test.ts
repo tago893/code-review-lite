@@ -182,4 +182,40 @@ describe("runWithFallback: decisions and usage are observable", () => {
     expect(events).toEqual([{ type: "start", model: "a", tryNo: 0 }, { type: "failed", model: "a", tryNo: 0, kind: "context_overflow", decision: "stop_not_retryable" }]);
     expect(JSON.stringify(events)).not.toContain("SECRET-BODY");
   });
+
+  describe("run-wide signal", () => {
+    const reason = () => Object.assign(new Error("run deadline exceeded"), { name: "TimeoutError" });
+
+    it("aborts the active attempt, waits for its cleanup, and does not retry or fall back", async () => {
+      const controller = new AbortController();
+      const calls: string[] = [];
+      let cleaned = false;
+      const attempt = (m: string, signal: AbortSignal): Promise<string> => {
+        calls.push(m);
+        return new Promise((_, reject) => signal.addEventListener("abort", () => setTimeout(() => { cleaned = true; reject(signal.reason); }, 100)));
+      };
+      const pending = runWithFallback(["a", "b"], attempt, { timeoutMs: 60_000, signal: controller.signal });
+      setTimeout(() => controller.abort(reason()), 500);
+      const result = await settle(pending);
+      expect(result).toMatchObject({ status: "rejected", reason: { name: "TimeoutError" } });
+      expect(cleaned).toBe(true);
+      expect(calls).toEqual(["a"]);
+    });
+
+    it("starts nothing when already aborted, and stops waiting between retries", async () => {
+      const done = new AbortController();
+      done.abort(reason());
+      let calls = 0;
+      const first = await settle(runWithFallback(["a"], async () => { calls += 1; return "x"; }, { timeoutMs: 1000, signal: done.signal }));
+      expect(first.status).toBe("rejected");
+      expect(calls).toBe(0);
+
+      const controller = new AbortController();
+      const attempt = async (): Promise<string> => { calls += 1; throw http(429, { headers: { "retry-after": "30" } }); };
+      const pending = runWithFallback(["a", "b"], attempt, { timeoutMs: 1000, signal: controller.signal });
+      setTimeout(() => controller.abort(reason()), 1000);
+      expect((await settle(pending)).status).toBe("rejected");
+      expect(calls).toBe(1);
+    });
+  });
 });

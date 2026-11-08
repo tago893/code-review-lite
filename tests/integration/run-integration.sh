@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Real-container integration scenarios with a scripted model (no provider key, no network).
-#   tests/integration/run-integration.sh <work-dir> [scenario...]      scenarios: attack obey report error overflow ratelimit abandon stepcap stepcap_stubborn hostile mcpdown budget budget_stubborn offline workload
+#   tests/integration/run-integration.sh <work-dir> [scenario...]      scenarios: attack obey report error overflow ratelimit abandon deadline stepcap stepcap_stubborn hostile mcpdown budget budget_stubborn offline workload
 # Every scenario runs the real CLI, the real OpenCode SDK, the real prep/agent/proxy containers and the real
 # network topology. Only the model is replaced, by tests/integration/stub-groq.mjs behind the real proxy, which
 # holds a recognisable DUMMY key (never a real one) so key handling can be asserted.
@@ -107,6 +107,23 @@ for s in "${scenarios[@]}"; do
       nreq=$(grep -c '"answered":429' "$d/stub.log"); [ "$nreq" -ge 6 ] && [ "$nreq" -le 30 ] && pass "provider requests stayed inside the retry budget ($nreq <= 30)" || fail "provider requests = $nreq"
       na=$(grep -c '"event":"attempt_session"' "$d/run.jsonl"); nc=$(grep -c '"event":"session_cleanup"' "$d/run.jsonl")
       [ "$na" = "$nc" ] && [ "$na" -ge 6 ] && pass "every one of the $na sessions was cleaned up" || fail "sessions=$na cleanups=$nc"
+      grep '"event":"session_cleanup"' "$d/run.jsonl" | grep -qE '"idle":false|"abort":"failed"|"delete":"failed"' && fail "a cleanup step failed" || pass "no cleanup step failed"
+      ;;
+    deadline)
+      # A hard run deadline (1 minute) hits while the provider is still answering 429: the active session must be cancelled and
+      # cleaned up, no second attempt or fallback may start, and the review must end incomplete with exit 2.
+      make_repo "$work/repo-deadline"
+      run_case deadline ratelimit_slow "$work/repo-deadline" REVIEW_AGENTS=code_quality REVIEW_SESSION_RETRIES=20 REVIEW_DEADLINE_MINUTES=1
+      d="$work/deadline"
+      echo "  exit=$(rc deadline)"; sed -n '1,12p' "$d/report.md" | sed 's/^/    /'
+      [ "$(rc deadline)" = 2 ] && pass "deadline ends the review with exit 2" || fail "exit code $(rc deadline), expected 2"
+      has "$d/report.md" "REVIEW INCOMPLETE" && has "$d/report.md" "Verdict: not_determined" && pass "REVIEW INCOMPLETE, not_determined" || fail "wrong status/verdict"
+      has "$d/report.md" "run_deadline_exceeded" && pass "reason run_deadline_exceeded reported" || fail "deadline reason missing"
+      last=$(grep '"event":"attempt_failed"' "$d/run.jsonl" | tail -1)
+      case "$last" in *'"kind":"abort"'*'"decision":"stop_not_retryable"'*) pass "the attempt running at the deadline failed as a non-retryable abort (no retry, no fallback)";; *) fail "last attempt_failed: $last";; esac
+      [ "$(grep '"event":"reviewer_failed"' "$d/run.jsonl" | grep -c '"kind":"abort"')" = 1 ] && pass "reviewer ended on the abort" || fail "reviewer_failed abort count"
+      na=$(grep -c '"event":"attempt_session"' "$d/run.jsonl"); nc=$(grep -c '"event":"session_cleanup"' "$d/run.jsonl")
+      [ "$na" -ge 1 ] && [ "$na" = "$nc" ] && [ "$na" = "$(grep -c '"event":"attempt_start"' "$d/run.jsonl")" ] && pass "all $na session(s) cleaned up, none started after the deadline" || fail "sessions=$na cleanups=$nc"
       grep '"event":"session_cleanup"' "$d/run.jsonl" | grep -qE '"idle":false|"abort":"failed"|"delete":"failed"' && fail "a cleanup step failed" || pass "no cleanup step failed"
       ;;
     abandon)
