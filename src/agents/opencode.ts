@@ -14,12 +14,23 @@ export interface ExploreSession {
   close(): Promise<void>;
 }
 
+/** One tool call OpenCode made during Phase 1. Output content is not kept, only its size, so traces never carry code. */
+export interface ToolCall {
+  readonly tool: string;
+  readonly status: string;
+  readonly input: Readonly<Record<string, unknown>>;
+  readonly outputChars: number;
+  readonly error?: string;
+}
+
 export interface LaunchOptions {
   readonly repoRoot: string;
   readonly baseUrl: string;
   /** Already stripped of credentials. */
   readonly env: NodeJS.ProcessEnv;
   readonly permissions: AgentPermissions;
+  /** Called once per tool call after each Phase 1 prompt. */
+  readonly onToolCall?: (call: ToolCall) => void;
 }
 
 export type OpenCodeLauncher = (options: LaunchOptions) => Promise<ExploreSession>;
@@ -29,6 +40,7 @@ export interface SessionDeps {
   readonly launcher: OpenCodeLauncher;
   /** The parent environment. It is sanitised before anything is launched. */
   readonly env?: NodeJS.ProcessEnv;
+  readonly onToolCall?: (call: ToolCall) => void;
 }
 
 export interface OpenCodeRunnerDeps extends SessionDeps {
@@ -44,7 +56,7 @@ export function createSessionProvider(deps: SessionDeps): SessionProvider {
   const env = sanitizeEnv(deps.env ?? process.env);
   let session: Promise<ExploreSession> | undefined;
   return (repoRoot) => {
-    session ??= deps.launcher({ repoRoot, baseUrl: deps.config.groqBaseUrl, env, permissions: buildAgentPermissions(repoRoot) });
+    session ??= deps.launcher({ repoRoot, baseUrl: deps.config.groqBaseUrl, env, permissions: buildAgentPermissions(repoRoot), ...(deps.onToolCall ? { onToolCall: deps.onToolCall } : {}) });
     return session;
   };
 }

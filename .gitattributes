@@ -3,5 +3,6 @@ tests/fixtures/** -text
 
 # Files that run inside Linux containers must keep LF line endings.
 Dockerfile text eol=lf
+*.Dockerfile text eol=lf
 *.sh text eol=lf
 *.mjs text eol=lf

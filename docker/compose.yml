@@ -1,0 +1,121 @@
+# End-to-end review stack (Task 10).
+#
+#   host repo ──(ro bind)──> prep (no network, no key) ──writes──> repo_ws, ctx_ws
+#                                                                   │ (ro mounts)
+#   Groq <── proxy (key, allow-list) <── internal network <── agent (OpenCode, no key, no internet)
+#
+# The agent is attached ONLY to the internal network (`internal: true`), so its only reachable peer is `proxy`.
+# The proxy is the only service on the egress network and the only holder of GROQ_API_KEY (passed by name).
+name: crl
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  proxy:
+    <<: *hardening
+    build: { context: .., dockerfile: docker/proxy.Dockerfile }
+    environment:
+      - GROQ_API_KEY
+      - UPSTREAM_URL
+      - PROXY_LOG_BODIES
+    networks: [internal, egress]
+    volumes:
+      - proxy_logs:/logs
+    tmpfs: [/tmp]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+
+  # Test only (profile: stub): a scripted model that stands in for the provider, so no key or network is needed.
+  stub:
+    <<: *hardening
+    profiles: [stub]
+    image: node:22-slim
+    command: [node, /stub.mjs]
+    environment:
+      - STUB_MODE
+      - STUB_EXPECT_KEY=${GROQ_API_KEY:-}
+    volumes:
+      - ../tests/integration/stub-groq.mjs:/stub.mjs:ro
+    networks: [egress]
+    mem_limit: 128m
+    pids_limit: 64
+
+  prep:
+    <<: *hardening
+    build: { context: .., dockerfile: docker/prep.Dockerfile }
+    network_mode: none
+    user: "0"
+    command:
+      - node
+      - dist/cli.js
+      - prepare
+      - --repo
+      - /raw/repo
+      - --base
+      - ${REVIEW_BASE:?set REVIEW_BASE}
+      - --head
+      - ${REVIEW_HEAD:?set REVIEW_HEAD}
+      - --out-repo
+      - /out/repo
+      - --out-ctx
+      - /out/context
+    volumes:
+      - ${REVIEW_REPO_DIR:?set REVIEW_REPO_DIR}:/raw/repo:ro
+      - repo_ws:/out/repo
+      - ctx_ws:/out/context
+    tmpfs: [/tmp]
+    mem_limit: 512m
+    cpus: 1
+    pids_limit: 128
+
+  agent:
+    <<: *hardening
+    build: { context: .., dockerfile: docker/agent.Dockerfile }
+    depends_on:
+      proxy: { condition: service_started }
+    networks: [internal]
+    command:
+      - node
+      - /opt/crl/dist/cli.js
+      - review
+      - --repo
+      - /repo
+      - --ctx
+      - /review/context
+      - --prompts
+      - /opt/crl/prompts
+      - --out
+      - /review/out/report.md
+    environment:
+      - GROQ_BASE_URL=http://proxy:8080/openai/v1
+      - REVIEWER_MODEL
+      - COORDINATOR_MODEL
+      - VERIFIER_MODEL
+      - FALLBACK_MODEL
+      - REVIEW_TIMEOUT_SCALE
+      - REVIEW_AGENTS
+    volumes:
+      - repo_ws:/repo:ro
+      - ctx_ws:/review/context:ro
+      - out_ws:/review/out
+    tmpfs:
+      - /tmp
+      - /home/node:uid=1000,gid=1000,mode=700
+    mem_limit: 2g
+    cpus: 2
+    pids_limit: 512
+
+volumes:
+  repo_ws: {}
+  ctx_ws: {}
+  out_ws: {}
+  proxy_logs: {}
+
+networks:
+  internal:
+    internal: true
+  egress: {}

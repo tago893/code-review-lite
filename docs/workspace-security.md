@@ -39,3 +39,23 @@ raw checkout ──(ro mount)──> prep (no network, no key) ──writes─�
 - The boundary checks run against a probe in the agent image, not against the OpenCode process; the real runner,
   proxy and permissions are joined to this compose file in a later task.
 - `scripts/probe-boundary.sh` is bind-mounted into the test run; that is a test-only mount.
+
+## End-to-end sandbox (Task 10)
+`docker/run.sh --repo <dir> --base <rev> --head <rev>` runs `prepare` (no network, no key), then `review` in an agent
+container on an `internal: true` network whose only peer is `proxy`. `proxy` is the only holder of `GROQ_API_KEY`
+(passed by name), forwards only `POST /openai/v1/chat/completions` and `GET /openai/v1/models`, and discards inbound
+Authorization. All three containers are non-root-capable, read-only, `cap_drop: ALL`, `no-new-privileges`, with
+memory, CPU and PID limits.
+
+Checks (real containers, real OpenCode 1.19.5):
+- `tests/integration/probe-agent.sh` (22 OS-level checks: user, read-only mounts, no socket or raw mount, no key, no egress).
+- `tests/integration/run-integration.sh <dir>`: scripted-model scenarios `attack`, `obey`, `report`, `error`.
+- One live Groq run on the synthetic repo with a seeded SQL injection.
+
+Known limits:
+- `REVIEW_AGENTS` narrows a run and the report says so; `REVIEW_TIMEOUT_SCALE` (1 to 10) lengthens timeouts. Both exist
+  because the 8,000 tokens-per-minute tier cannot finish three reviewers on even a tiny diff.
+- A model that obeys an injection and reports nothing yields `approved`; the pipeline cannot tell a missed bug from a clean diff.
+- Denied tools are mostly not offered to the model at all (OpenCode lists only glob, grep, read); out-of-bounds reads are
+  refused by OpenCode permissions. The mounts remain the primary boundary.
+- Docker Desktop on Windows was the only platform tested. `internal: true` blocked all egress there.

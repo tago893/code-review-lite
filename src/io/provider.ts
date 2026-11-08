@@ -49,7 +49,7 @@ export interface LocalGitOptions {
 export function localGitProvider(options: LocalGitOptions): InputProvider {
   const git = async (args: readonly string[]): Promise<string> => {
     try {
-      const { stdout } = await run("git", ["-C", options.repoDir, "-c", "core.fsmonitor=false", ...args], {
+      const { stdout } = await run("git", ["-C", options.repoDir, "--no-optional-locks", "-c", "core.fsmonitor=false", ...args], {
         maxBuffer: MAX_GIT_OUTPUT, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", GIT_TERMINAL_PROMPT: "0" },
       });
       return stdout;

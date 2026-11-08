@@ -18,6 +18,8 @@ import { confirmWithVerifier, type Verifier } from "./verify/confirm.js";
 
 /** What the review stage receives: the trusted-side plan plus where the sanitised snapshot and context live. */
 export interface PipelineInput {
+  /** Facts about how this run was configured (for example a restricted reviewer set), shown in the report. */
+  readonly notes?: readonly string[];
   readonly plan: ReviewPlan;
   readonly meta: { readonly baseSha: string; readonly headSha: string };
   readonly paths: ReviewerPaths;
@@ -75,7 +77,7 @@ async function execute(input: PipelineInput, deps: PipelineDeps, started: number
     log.event("review_done", { completion: data.completion, verdict: data.verdict, findings: data.findings.length });
     return Object.freeze({ report: renderReport({ ...data, metrics: final }), completion: data.completion, verdict: data.verdict, metrics: final, exitCode: data.completion === "complete" ? (0 as const) : (2 as const) });
   };
-  const base: Omit<ReportData, "metrics" | "completion" | "verdict"> = { reasons: [], degraded: [], findings: [], preexisting: [], linked: {}, notes: [], traces: {}, failedReviewers: [], excluded: plan.excluded, withheld: plan.withheld, tier: plan.tier, range: { base: input.meta.baseSha, head: input.meta.headSha } };
+  const base: Omit<ReportData, "metrics" | "completion" | "verdict"> = { reasons: [], degraded: [], findings: [], preexisting: [], linked: {}, notes: [...(input.notes ?? [])], traces: {}, failedReviewers: [], excluded: plan.excluded, withheld: plan.withheld, tier: plan.tier, range: { base: input.meta.baseSha, head: input.meta.headSha } };
 
   if (plan.disposition === "manual_review") {
     // Changes exist that no reviewer can analyse: a clean approval would be false, so this is incomplete.

@@ -106,7 +106,7 @@ async function runOne(category: Category, deps: ReviewerDeps, gate: RateLimitGat
     return resultFor(category, parsed, common);
   } catch (error) {
     const failed = describeFailure(category, error);
-    log.event("reviewer_failed", { reviewer: category, error: failed.error, failureClass: failed.failureClass, durationMs: Date.now() - started });
+    log.event("reviewer_failed", { reviewer: category, error: failed.error, failureClass: failed.failureClass, ...failureDetail(error), durationMs: Date.now() - started });
     return { findings: [], failed, outcome: { reviewer: category, required: true, executed: false }, tokensIn: 0, tokensOut: 0, retries: 0, fellBack: false };
   }
 }
@@ -116,6 +116,13 @@ function resultFor(category: Category, parsed: ParsedReviewerOutput, common: Pic
   const unusable = parsed.error !== undefined && parsed.findings.length === 0;
   const failed: FailedReviewer | undefined = unusable ? { reviewer: category, error: "unusable_output", failureClass: "output" } : undefined;
   return { findings: parsed.findings, outcome, ...(failed ? { failed } : {}), ...common };
+}
+
+/** Fixed-vocabulary detail for the log: error kinds per attempt, or the SDK error name. Never message text. */
+function failureDetail(error: unknown): Record<string, unknown> {
+  if (error instanceof ModelsExhaustedError) return { attempts: error.attempts };
+  const sdkName = (error as { sdkName?: unknown } | null)?.sdkName;
+  return { kind: classifyError(error).kind, ...(typeof sdkName === "string" ? { sdkName } : {}) };
 }
 
 /** Maps any error to a fixed code and class. The error's own message is never used. */

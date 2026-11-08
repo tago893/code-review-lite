@@ -78,16 +78,23 @@ function modelFromEnv(env: Env, name: string, fallback: string): string {
   return value ? value : fallback;
 }
 
+/** Multiplies the task and overall timeouts, for a provider tier with a low tokens-per-minute limit. 1 to 10; anything else is an error. */
+function timeoutScale(value: string | undefined): number {
+  if (value === undefined || value.trim() === "") return 1;
+  return parseOrThrow(z.string().regex(/^\d+$/).transform(Number).refine((n) => n >= 1 && n <= 10, "REVIEW_TIMEOUT_SCALE must be an integer from 1 to 10"), value.trim());
+}
+
 export function loadConfig(env: Env): Config {
   // Presence alone is a failure, even when empty: the agent container must never be given the key.
   if (env["GROQ_API_KEY"] !== undefined) {
     throw new Error("GROQ_API_KEY must not be set in the agent environment; only the credential proxy holds it");
   }
   const groqBaseUrl = parseOrThrow(baseUrlSchema, env["GROQ_BASE_URL"]);
+  const scale = timeoutScale(env["REVIEW_TIMEOUT_SCALE"]);
   const timeouts: Timeouts = Object.freeze({
-    taskMs: 5 * MINUTE_MS,
-    codeQualityTaskMs: 10 * MINUTE_MS,
-    overallMs: 25 * MINUTE_MS,
+    taskMs: 5 * MINUTE_MS * scale,
+    codeQualityTaskMs: 10 * MINUTE_MS * scale,
+    overallMs: 25 * MINUTE_MS * scale,
     inactivityMs: MINUTE_MS,
     heartbeatMs: MINUTE_MS / 2,
   });

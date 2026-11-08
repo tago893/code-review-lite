@@ -4,7 +4,7 @@ export { describeRedactions, redactSecrets, redactSecretsDetailed } from "./reda
 export type { RedactionFinding, RedactionKind, RedactOptions, RedactionResult } from "./redact.js";
 
 const BOUNDARY_NAMES =
-  "mr_input|mr_body|mr_comments|mr_details|changed_files|previous_review|custom_review_instructions";
+  "mr_input|mr_body|mr_comments|mr_details|changed_files|previous_review|custom_review_instructions|shared_context|candidate_findings";
 // Optional whitespace is allowed anywhere a browser or model would still read the text as a tag.
 const BOUNDARY_TAG = new RegExp(`<\\s*/?\\s*(?:${BOUNDARY_NAMES})(?![A-Za-z0-9_])[^>\\n]*>?`, "gi");
 const MAX_STRIP_PASSES = 10;
