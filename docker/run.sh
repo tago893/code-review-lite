@@ -37,7 +37,7 @@ fi
 # under the ~34 KB request size at which a free-tier 8000 TPM limit was exceeded). Off by default: nothing changes.
 case "${REVIEW_HISTORY_BUDGET_BYTES:-0}" in
   ''|0) ;;
-  *) export PROXY_REQUIRE_HISTORY=1; export PROXY_MAX_REQUEST_BYTES="${PROXY_MAX_REQUEST_BYTES:-32000}" ;;
+  *) export PROXY_RETRY_ALLOWANCE="${PROXY_RETRY_ALLOWANCE:-${REVIEW_SESSION_RETRIES:-5}}"; export PROXY_REQUIRE_HISTORY=1; export PROXY_MAX_REQUEST_BYTES="${PROXY_MAX_REQUEST_BYTES:-32000}" ;;
 esac
 
 native() { (cd "$1" && (pwd -W 2>/dev/null || pwd)); }

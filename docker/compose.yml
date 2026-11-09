@@ -26,6 +26,8 @@ services:
       - PROXY_MAX_REQUESTS
       - PROXY_REQUIRE_HISTORY
       - PROXY_MAX_REQUEST_BYTES
+      - PROXY_RETRY_ALLOWANCE
+      - PROXY_RETRY_WINDOW_MS
     networks: [internal, egress]
     volumes:
       - proxy_logs:/logs

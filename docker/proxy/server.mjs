@@ -15,10 +15,17 @@
 //   Without it the proxy answers 403 "history_pruning_inactive" and forwards nothing, so a missing, unloaded, crashed or
 //   bypassed plugin cannot send an unpruned conversation. PROXY_MAX_REQUEST_BYTES is an independent backstop: a
 //   tool-enabled request body above it gets the same refusal. Neither refusal counts against the request budget.
+//   Provider retries: OpenCode re-sends a request after an HTTP 429 without running the pruning hook again, so the retry
+//   carries no stamp. A request forwarded WITH a valid stamp is therefore remembered by the SHA-256 of (path, model, body).
+//   Only after the provider answered that request with 429 may a byte-identical, unstamped request be forwarded, once per
+//   429, within PROXY_RETRY_WINDOW_MS (default 120000) and at most PROXY_RETRY_ALLOWANCE times (default 5, the default
+//   REVIEW_SESSION_RETRIES). Any other status clears the memory. An accepted retry still passes the size ceiling and
+//   spends the request budget. Only the digest prefix and counts are logged, never request text.
 //   With PROXY_LOG_BODIES=1 (tests only) request bodies are also appended to /logs/requests.jsonl so a test can
 //   check exactly what reached the model. Never enable that for real repositories.
 import http from "node:http";
 import https from "node:https";
+import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
 
 const fatal = (message) => {
@@ -59,6 +66,11 @@ const REQUIRE_HISTORY = process.env.PROXY_REQUIRE_HISTORY === "1";
 const MAX_REQUEST_BYTES = parseCeiling(process.env.PROXY_MAX_REQUEST_BYTES);
 const HISTORY_HEADER = "x-cra-history";
 const HISTORY_STAMP = /^[1-9]\d{0,6}$/;
+const RETRY_ALLOWANCE = parseBounded("PROXY_RETRY_ALLOWANCE", process.env.PROXY_RETRY_ALLOWANCE, 5, 0, 20);
+const RETRY_WINDOW_MS = parseBounded("PROXY_RETRY_WINDOW_MS", process.env.PROXY_RETRY_WINDOW_MS, 120000, 200, 600000);
+const LEDGER_MAX = 64;
+/** digest -> { authorized, retries, expiresAt, since }. Only stamped, forwarded requests are ever entered. */
+const ledger = new Map();
 const MAX_ERROR_CAPTURE = 8192;
 const MAX_BODY = 1_000_000;
 const ALLOW = [
@@ -75,6 +87,26 @@ function parseBudget(raw) {
   return Number(raw);
 }
 
+function parseBounded(name, raw, fallback, min, max) {
+  if (raw === undefined || raw === "") return fallback;
+  if (!/^\d{1,7}$/.test(raw) || Number(raw) < min || Number(raw) > max) {
+    process.stderr.write(`FATAL: ${name} must be an integer from ${min} to ${max}\n`);
+    process.exit(1);
+  }
+  return Number(raw);
+}
+
+const digestOf = (path, model, body) => createHash("sha256").update(path).update("\0").update(String(model)).update("\0").update(body).digest("hex");
+
+/** Why a repeated, unstamped request may not use a retry authorisation, or undefined when it may. */
+function retryStatus(entry, now) {
+  if (!entry) return "unstamped";
+  if (entry.retries >= RETRY_ALLOWANCE) return "retry_exhausted";
+  if (!entry.authorized) return "retry_not_authorized";
+  if (now > entry.expiresAt) return "retry_expired";
+  return undefined;
+}
+
 function parseCeiling(raw) {
   if (raw === undefined || raw === "") return undefined;
   if (!/^[1-9]\d{3,8}$/.test(raw)) {
@@ -85,9 +117,9 @@ function parseCeiling(raw) {
 }
 
 /** Why a tool-enabled request must not be forwarded, or undefined. Pure: only the summary, the stamp header and the size. */
-function historyRefusal(summary, stamp, bytes) {
+function historyRefusal(summary, stamp, bytes, retryRefusal) {
   if (!summary.has_tools) return undefined;
-  if (REQUIRE_HISTORY && !(typeof stamp === "string" && HISTORY_STAMP.test(stamp))) return "unstamped";
+  if (REQUIRE_HISTORY && !(typeof stamp === "string" && HISTORY_STAMP.test(stamp)) && retryRefusal !== undefined) return retryRefusal;
   if (MAX_REQUEST_BYTES !== undefined && bytes > MAX_REQUEST_BYTES) return "over_ceiling";
   return undefined;
 }
@@ -178,7 +210,12 @@ http
       }
       const body = Buffer.concat(chunks);
       const summary = req.method === "POST" ? describeBody(body) : {};
-      const refusal = req.method === "POST" ? historyRefusal(summary, req.headers[HISTORY_HEADER], body.length) : undefined;
+      const stamped = typeof req.headers[HISTORY_HEADER] === "string" && HISTORY_STAMP.test(req.headers[HISTORY_HEADER]);
+      const tracked = req.method === "POST" && REQUIRE_HISTORY && summary.has_tools === true;
+      const digest = tracked ? digestOf(path, summary.model, body) : undefined;
+      const entry = digest === undefined ? undefined : ledger.get(digest);
+      const retryRefusal = tracked && !stamped ? retryStatus(entry, Date.now()) : undefined;
+      const refusal = req.method === "POST" ? historyRefusal(summary, req.headers[HISTORY_HEADER], body.length, retryRefusal) : undefined;
       if (refusal) {
         log({ event: "history_denied", rid, method: req.method, path, reason: refusal, bytes: body.length, ceiling: MAX_REQUEST_BYTES ?? null, ...summary });
         res.writeHead(403, { "content-type": "application/json" });
@@ -194,6 +231,14 @@ http
         return;
       }
       budget.used += 1;
+      if (tracked && stamped) {
+        if (!ledger.has(digest) && ledger.size >= LEDGER_MAX) ledger.delete(ledger.keys().next().value);
+        ledger.set(digest, { authorized: false, retries: 0, expiresAt: 0, since: 0 });
+      } else if (tracked && entry) {
+        entry.retries += 1;
+        entry.authorized = false; // one retry per 429
+        log({ event: "history_retry_authorized", rid, retryNo: entry.retries, allowance: RETRY_ALLOWANCE, waitedMs: Date.now() - entry.since, digest: digest.slice(0, 12), bytes: body.length, ...summary });
+      }
       log({ event: "request", rid, method: req.method, path, budgetUsed: budget.used, budgetMax: MAX_REQUESTS, bytes: body.length, inbound_auth_discarded: Boolean(req.headers.authorization), history_stamp: typeof req.headers[HISTORY_HEADER] === "string", ...summary });
       if (LOG_BODIES && req.method === "POST") {
         try { appendFileSync(BODY_LOG, `${JSON.stringify({ t: Date.now(), path, ...summary, body: body.toString("utf8") })}\n`); } catch { /* test aid only */ }
@@ -202,7 +247,13 @@ http
       const headers = { "content-type": req.headers["content-type"] ?? "application/json", accept: req.headers.accept ?? "*/*", authorization: `Bearer ${KEY}`, host: upstream.host, "content-length": String(body.length) };
       const out = transport.request({ hostname: upstream.hostname, port: upstream.port || undefined, path: req.url, method: req.method, headers }, (ur) => {
         const status = ur.statusCode ?? 502;
-        const retryAfter = safeValue(ur.headers["retry-after"]);
+        if (digest !== undefined && ledger.has(digest)) {
+          const known = ledger.get(digest);
+          if (status === 429) {
+            known.authorized = true; known.since = Date.now(); known.expiresAt = known.since + RETRY_WINDOW_MS;
+            log({ event: "history_retry_window", rid, digest: digest.slice(0, 12), retriesUsed: known.retries, allowance: RETRY_ALLOWANCE, windowMs: RETRY_WINDOW_MS });
+          } else ledger.delete(digest);
+        }        const retryAfter = safeValue(ur.headers["retry-after"]);
         const rateLimit = rateLimitOf(ur.headers);
         log({ event: "upstream", rid, path, status, ttfbMs: Date.now() - t0, ...(retryAfter ? { retryAfter } : {}), ...(rateLimit ? { rateLimit } : {}) });
         let bytes = 0;
@@ -222,6 +273,7 @@ http
         ur.pipe(res);
       });
       out.on("error", (error) => {
+        if (digest !== undefined) ledger.delete(digest);
         log({ event: "upstream_error", rid, path, code: error.code ?? "unknown", totalMs: Date.now() - t0 });
         res.writeHead(502);
         res.end("upstream error");
@@ -229,4 +281,4 @@ http
       out.end(body);
     });
   })
-  .listen(LISTEN_PORT, "0.0.0.0", () => log({ event: "listening", port: LISTEN_PORT, upstream_host: upstream.host, log_bodies: LOG_BODIES, budget_max: MAX_REQUESTS, require_history: REQUIRE_HISTORY, max_request_bytes: MAX_REQUEST_BYTES ?? null }));
+  .listen(LISTEN_PORT, "0.0.0.0", () => log({ event: "listening", port: LISTEN_PORT, upstream_host: upstream.host, log_bodies: LOG_BODIES, budget_max: MAX_REQUESTS, require_history: REQUIRE_HISTORY, retry_allowance: RETRY_ALLOWANCE, retry_window_ms: RETRY_WINDOW_MS, max_request_bytes: MAX_REQUEST_BYTES ?? null }));
