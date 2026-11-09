@@ -1,0 +1,5 @@
+# Test only: replaces CRA's history plugin in the agent image with a deliberately broken one (inert).
+services:
+  agent:
+    volumes:
+      - ../tests/integration/history-plugin-inert.mjs:/opt/crl/dist/agents/history-plugin.js:ro

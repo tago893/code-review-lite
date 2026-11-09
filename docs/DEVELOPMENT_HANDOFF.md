@@ -19,3 +19,13 @@
 
 ## Next action
 Event Booking Case 001 evaluation (awaiting approval; do not call Groq before then). No more infrastructure work.
+
+## Bounded tool-result history (off by default)
+
+`REVIEW_HISTORY_BUDGET_BYTES` (0/unset = off; otherwise 2000-500000, e.g. 8000) keeps only the newest tool-result bodies that fit the budget in each model request and replaces older ones with a short reference (`[cra:pruned tool=... path=... lines=... bytes=... sha256=...]`). It is a trusted CRA OpenCode plugin (`src/agents/history-plugin.ts`) registered only from inline config. Stored sessions, the snapshot and citation verification are untouched; the model can repeat a call to see a result again.
+
+Fail-closed: `docker/run.sh` sets `PROXY_REQUIRE_HISTORY=1` and a default `PROXY_MAX_REQUEST_BYTES=32000` when the budget is on. The proxy refuses (403 `history_pruning_inactive`, before the request budget and the upstream) any tool-enabled request without the `x-cra-history` stamp the plugin adds only after a successful prune, and any tool-enabled request over the ceiling. The driver also fails the attempt (tooling, non-retryable) on a recorded plugin error, a silent plugin (no prune after the start grace), or fewer prunes than model requests.
+
+Limits: running compose directly with the budget set but without `run.sh` has no proxy gate (the driver still fails the attempt, but only after the fact). The stamp assumes OpenCode runs `chat.headers` after the transform hook for the same request (true in 1.19.5; a change would cause refusals, not leaks). Growth is slowed (~0.5 KB/request in scripted runs vs ~4 KB), not eliminated. Bytes are not tokens. Not yet evaluated with a real model.
+
+Next action: one separately approved live Case 001 run with `REVIEW_HISTORY_BUDGET_BYTES=8000`.

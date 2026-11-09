@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { TRANSPORT_MARKER } from "../resilience/errors.js";
+import type { HistoryState } from "./history-stats.js";
 
 // Runs one OpenCode Phase 1 session without holding a long HTTP request open. The prompt is submitted with
 // promptAsync and observed by short polls, so no single request can hit a client transport timeout, tool calls can be
@@ -63,6 +65,11 @@ export interface DriverOptions {
   readonly maxProviderRetries: number;
   /** Consecutive failed polls tolerated before the attempt fails as a transport error. */
   readonly maxPollFailures: number;
+  /**
+   * Set when tool-result pruning is configured. The driver then refuses to call an investigation complete unless the
+   * plugin recorded a successful prune for every model request, and fails it if the plugin recorded an error.
+   */
+  readonly history?: { readonly read: () => HistoryState };
   readonly now?: () => number;
   readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
@@ -117,6 +124,19 @@ export async function driveSession(api: SessionApi, input: DriveInput, opts: Dri
     await api.promptAsync(sessionId, { model: input.model, text: input.prompt, stepLimited: input.stepLimit !== undefined });
     const promptedAt = now();
     const seenTools = new Set<string>();
+    const historyBase = input.stepLimit !== undefined ? opts.history?.read() : undefined;
+    const checkHistory = (requests: number, final: boolean): void => {
+      if (historyBase === undefined || opts.history === undefined) return;
+      const seen = opts.history.read();
+      const prunes = seen.prunes - historyBase.prunes;
+      const errors = seen.errors - historyBase.errors;
+      // A prune runs before the first model request, so a session that has shown no prune after the start grace has a
+      // plugin that is silent or whose hook failed without saying so. Fail now instead of waiting for the attempt timeout.
+      const silent = prunes === 0 && now() - promptedAt >= opts.startGraceMs;
+      const verdict = errors > 0 ? "plugin_error" : silent ? "plugin_silent" : final && (!seen.loaded || prunes < requests) ? "not_invoked_for_every_request" : "ok";
+      if (final || verdict !== "ok") emit("history_pruning", { sessionId, verdict, modelRequests: requests, prunes, stamps: seen.stamps - historyBase.stamps, errors, maxToolResults: seen.maxToolResults, maxKeptBytes: seen.maxKeptBytes, savedBytes: seen.savedBytes - historyBase.savedBytes, lastPruned: seen.lastPruned });
+      if (verdict !== "ok") throw Object.assign(new Error(`history pruning ${verdict}`), { name: "HistoryPruningFailed" });
+    };
     let lastRetryAttempt = 0;
     let pollFailures = 0;
 
@@ -142,6 +162,7 @@ export async function driveSession(api: SessionApi, input: DriveInput, opts: Dri
       if (errored) throw errored.info.error;
 
       const steps = messages.filter((m) => m.info.role === "assistant");
+      checkHistory(steps.length, false);
       if (input.stepLimit !== undefined && overranStepLimit(steps, input.stepLimit)) {
         emit("investigation_steps", { sessionId, steps: steps.length, stepLimit: input.stepLimit, limitReached: true, outcome: "overrun" });
         throw Object.assign(new Error("step limit exceeded"), { name: "StepLimitExceeded" });
@@ -167,6 +188,7 @@ export async function driveSession(api: SessionApi, input: DriveInput, opts: Dri
         continue;
       }
       if (!assistants.every((m) => m.info.time?.completed !== undefined)) continue;
+      checkHistory(assistants.length, true);
       const limitReached = input.stepLimit !== undefined && assistants.length >= input.stepLimit;
       if (input.stepLimit !== undefined) emit("investigation_steps", { sessionId, steps: assistants.length, stepLimit: input.stepLimit, limitReached, outcome: "finished" });
       return { text: finalText(assistants), tokensIn: lastUsage.input, tokensOut: lastUsage.output, tokensKnown: lastUsage.known, sessionId, steps: assistants.length, stepLimitReached: limitReached };
@@ -256,6 +278,7 @@ function traceTools(messages: readonly MessageLike[], seen: Set<string>, emit: (
       emit({
         tool: p.tool ?? "unknown", status: p.state.status, input: kept, ...(dropped.length > 0 ? { inputKeys: dropped } : {}),
         outputBytes: typeof output === "string" ? Buffer.byteLength(output) : 0,
+        ...(typeof output === "string" ? { outputSha256: createHash("sha256").update(output).digest("hex").slice(0, 12) } : {}),
         ...(typeof start === "number" && typeof end === "number" ? { durationMs: Math.max(0, end - start) } : {}),
         ...(error === undefined ? {} : { error }),
       });

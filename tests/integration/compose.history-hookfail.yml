@@ -1,0 +1,5 @@
+# Test only: replaces CRA's history plugin in the agent image with a deliberately broken one (hookfail).
+services:
+  agent:
+    volumes:
+      - ../tests/integration/history-plugin-hookfail.mjs:/opt/crl/dist/agents/history-plugin.js:ro

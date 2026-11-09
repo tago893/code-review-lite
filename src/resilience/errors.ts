@@ -24,6 +24,8 @@ export const TOOLING_MARKER = "CRA_TOOLING";
 export const BUDGET_MARKER = "CRA_REQUEST_BUDGET";
 /** The error code the proxy answers with (HTTP 403) once its per-run provider request budget is spent. */
 const BUDGET_CODE = "request_budget_exhausted";
+/** The error code the proxy answers with (HTTP 403) when history pruning is required but the request was not stamped as pruned, or is over the size ceiling. */
+const HISTORY_CODE = "history_pruning_inactive";
 
 const NETWORK_CODES: ReadonlySet<string> = new Set([
   "ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ECONNREFUSED", "EPIPE", "UND_ERR_SOCKET",
@@ -52,7 +54,7 @@ function classify(err: unknown): ErrorClass {
 
   if (name === "AbortError" || name === "TimeoutError" || code === "ABORT_ERR") return result("abort", false);
   if (name === "StepLimitExceeded" || code === STEP_LIMIT_MARKER) return result("step_limit", false);
-  if (name === "ToolsetVerificationFailed" || code === TOOLING_MARKER) return result("tooling", false);
+  if (name === "ToolsetVerificationFailed" || name === "HistoryPruningFailed" || code === TOOLING_MARKER || hasProxyCode(err, HISTORY_CODE)) return result("tooling", false);
   if (code === BUDGET_MARKER || isBudgetExhausted(err)) return result("budget", false);
   if (name === "ContextOverflowError" || code === "context_length_exceeded" || status === 413 || CONTEXT_OVERFLOW_MESSAGE.test(message)) return result("context_overflow", false);
   if (status === 401 || status === 403) return result("auth", false);
@@ -66,10 +68,14 @@ function classify(err: unknown): ErrorClass {
 
 /** The proxy's budget refusal arrives as an HTTP 403 whose body carries a fixed code; look for it where OpenCode may put it. */
 function isBudgetExhausted(err: unknown): boolean {
+  return hasProxyCode(err, BUDGET_CODE);
+}
+
+function hasProxyCode(err: unknown, proxyCode: string): boolean {
   if (statusOf(err) !== 403) return false;
   const data = get(err, "data");
   return [get(err, "message"), get(data, "message"), get(data, "responseBody"), get(err, "responseBody"), get(get(err, "response"), "body")]
-    .some((field) => typeof field === "string" && field.includes(BUDGET_CODE));
+    .some((field) => typeof field === "string" && field.includes(proxyCode));
 }
 
 function result(kind: ErrorKind, retryable: boolean, retryAfter?: number): ErrorClass {

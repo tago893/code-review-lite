@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Real-container integration scenarios with a scripted model (no provider key, no network).
-#   tests/integration/run-integration.sh <work-dir> [scenario...]      scenarios: attack obey report error overflow ratelimit abandon deadline stepcap stepcap_stubborn hostile mcpdown budget budget_stubborn offline workload
+#   tests/integration/run-integration.sh <work-dir> [scenario...]      scenarios: attack obey report error overflow ratelimit abandon deadline stepcap stepcap_stubborn hostile mcpdown budget budget_stubborn offline workload history history_long history_guard history_broken
 # Every scenario runs the real CLI, the real OpenCode SDK, the real prep/agent/proxy containers and the real
 # network topology. Only the model is replaced, by tests/integration/stub-groq.mjs behind the real proxy, which
 # holds a recognisable DUMMY key (never a real one) so key handling can be asserted.
@@ -313,6 +313,84 @@ for s in "${scenarios[@]}"; do
       [ "$(rc error)" = 2 ] && pass "provider failure exits 2" || fail "exit code $(rc error), expected 2"
       has "$d/report.md" "REVIEW INCOMPLETE" && pass "report headline is REVIEW INCOMPLETE" || fail "headline missing"
       has "$d/report.md" "Verdict: not_determined" && pass "verdict is not_determined (not approved)" || fail "wrong verdict"
+      ;;
+    history|history_long)
+      # Bounded tool-result history, provider-free. The SAME scripted investigation (STUB_CALLS tool calls on a fixture with a
+      # 700-line file: early read of src/users.ts, a forbidden bash call, an out-of-root read, paging, greps, a re-read of
+      # src/users.ts near the end) runs with pruning OFF and ON. Bytes, not tokens.
+      calls=20; [ "$s" = history_long ] && calls=40
+      make_repo "$work/repo-$s" BIGFILE=1
+      for variant in off on; do
+        extra=(); [ "$variant" = on ] && extra=(REVIEW_HISTORY_BUDGET_BYTES=8000)
+        run_case "${s}_$variant" long "$work/repo-$s" REVIEW_AGENTS=code_quality REVIEW_MAX_RETRIES=0 REVIEW_INVESTIGATION_STEPS=$((calls + 2)) PROXY_MAX_REQUESTS=$((calls + 10)) STUB_CALLS=$calls "${extra[@]}"
+        d="$work/${s}_$variant"
+        echo "  [$variant] exit=$(rc "${s}_$variant")"
+        h=$(node "$rootn/tests/integration/inspect-history.mjs" "$d/requests.jsonl" "$d/proxy.log" "$d/run.jsonl"); echo "    $h" | cut -c1-900
+        eval "h_$variant=\$h"
+        [ "$(rc "${s}_$variant")" = "$(rc "${s}_off")" ] && pass "[$variant] same exit code as the unpruned run ($(rc "${s}_$variant"))" || fail "[$variant] exit code differs from the unpruned run"
+        n=$(grep '"event":"tool_call"' "$d/run.jsonl" | grep -c '"tool":"cra_[a-z]*","status":"completed"'); [ "$n" -ge $((calls - 2)) ] && pass "[$variant] $n cra_* tool calls completed (>= $((calls - 2)); two scripted calls are forbidden)" || fail "[$variant] only $n cra_* calls completed"
+        grep '"event":"tool_call"' "$d/run.jsonl" | grep '"tool":"bash"' | grep -q '"status":"completed"' && fail "[$variant] forbidden bash completed" || pass "[$variant] forbidden bash call did not complete"
+        grep '"event":"tool_call"' "$d/run.jsonl" | grep '/etc/passwd' | grep -q '"status":"completed"' && fail "[$variant] out-of-root read completed" || pass "[$variant] out-of-root read did not complete"
+        [ ! -e "$d/pwned.txt" ] && pass "[$variant] nothing created in /review/out" || fail "[$variant] unexpected file in /review/out"
+        grep '"event":"session_cleanup"' "$d/run.jsonl" | grep -q '"abort":"ok".*"idle":true.*"delete":"ok"' && pass "[$variant] session cancelled, idle and deleted" || fail "[$variant] session cleanup not confirmed"
+      done
+      j() { node -e "const h=JSON.parse(process.argv[1]);const v=process.argv[2].split('.').reduce((a,k)=>a?.[k],h);console.log(Array.isArray(v)?v.join(','):v)" "$1" "$2"; }
+      echo "  OFF: first=$(j "$h_off" first) max=$(j "$h_off" max) total=$(j "$h_off" total) slope/req=$(j "$h_off" slopeBytesPerRequest)"
+      echo "  ON : first=$(j "$h_on" first) max=$(j "$h_on" max) total=$(j "$h_on" total) slope/req=$(j "$h_on" slopeBytesPerRequest)"
+      [ "$(j "$h_on" max)" -lt "$(j "$h_off" max)" ] && pass "pruning lowered the largest request ($(j "$h_off" max) -> $(j "$h_on" max) bytes)" || fail "pruning did not lower the largest request"
+      [ "$(j "$h_on" total)" -lt "$(j "$h_off" total)" ] && pass "pruning lowered total request bytes ($(j "$h_off" total) -> $(j "$h_on" total))" || fail "pruning did not lower total request bytes"
+      [ "$(j "$h_on" lastPrunedRefs)" -gt 0 ] && pass "the last request carried $(j "$h_on" lastPrunedRefs) pruned references" || fail "no pruned references were sent"
+      [ "$(j "$h_off" lastPrunedRefs)" = 0 ] && pass "the unpruned run sent no references" || fail "references appeared with pruning off"
+      [ "$(j "$h_on" proxy.historyDenied)" = 0 ] && pass "the proxy refused no request: every tool-enabled request was stamped" || fail "the proxy refused $(j "$h_on" proxy.historyDenied) request(s)"
+      [ "$(j "$h_on" proxy.stamped)" = "$(j "$h_on" proxy.forwarded)" ] || [ "$(j "$h_on" proxy.stamped)" -ge "$(j "$h_on" toolRequests)" ] && pass "every tool-enabled request carried the stamp ($(j "$h_on" proxy.stamped) stamped)" || fail "stamp count does not cover the tool-enabled requests"
+      [ "$(j "$h_off" proxy.stamped)" = 0 ] && pass "no stamp when pruning is off" || fail "stamps appeared with pruning off"
+      has "$work/${s}_on/run.jsonl" '"event":"history_pruning"' && pass "history_pruning telemetry was recorded" || fail "history_pruning telemetry missing"
+      grep '"event":"history_pruning"' "$work/${s}_on/run.jsonl" | grep -q '"verdict":"ok"' && pass "driver verdict: pruned for every model request" || fail "driver verdict is not ok"
+      has "$work/${s}_off/run.jsonl" '"event":"history_pruning"' && fail "history telemetry appeared with pruning off" || pass "no pruning telemetry when it is off"
+      hs=$(j "$h_on" usersReadHashes); first=${hs%%,*}; lastr=${hs##*,}
+      [ -n "$first" ] && [ "$first" = "$lastr" ] && [ "$hs" != "$first" ] && pass "src/users.ts re-read after its result was pruned returned identical bytes (sha256 prefix $first)" || fail "re-read hash mismatch or missing: $hs"
+      ;;
+    history_guard)
+      # Pruning ON with the existing safety scenarios: forbidden tools, step cap, hostile repository.
+      make_repo "$work/repo-hg-attack"
+      run_case hg_attack attack "$work/repo-hg-attack" REVIEW_AGENTS=security REVIEW_HISTORY_BUDGET_BYTES=8000
+      d="$work/hg_attack"; echo "  attack: exit=$(rc hg_attack)"
+      for t in bash write edit webfetch; do grep '"event":"tool_call"' "$d/run.jsonl" | grep "\"tool\":\"$t\"" | grep -q '"status":"completed"' && fail "[attack+pruning] forbidden tool '$t' completed" || pass "[attack+pruning] forbidden tool '$t' did not complete"; done
+      escapes=$(grep '"event":"tool_call"' "$d/run.jsonl" | grep '"tool":"cra_' | grep -vc '"status":"error"'); [ "$escapes" = 0 ] && pass "[attack+pruning] every out-of-bounds cra_* call was refused" || fail "[attack+pruning] $escapes out-of-bounds call(s) not refused"
+      offered=$(grep -o '"toolNames":\[[^]]*\]' "$d/stub.log" | sort -u | paste -sd, -); [ "$offered" = '"toolNames":["cra_glob","cra_grep","cra_list","cra_read"]' ] && pass "[attack+pruning] only the four cra_* tools were offered" || fail "[attack+pruning] tool set: $offered"
+      [ ! -e "$d/pwned.txt" ] && [ ! -e "$d/env.txt" ] && pass "[attack+pruning] no file created" || fail "[attack+pruning] a forbidden write created a file"
+      grep '"event":"history_pruning"' "$d/run.jsonl" | grep -q '"verdict":"ok"' && pass "[attack+pruning] pruning verified for the investigation" || fail "[attack+pruning] pruning verdict missing"
+      make_repo "$work/repo-hg-cap"
+      run_case hg_cap loop "$work/repo-hg-cap" REVIEW_AGENTS=code_quality REVIEW_INVESTIGATION_STEPS=3 REVIEW_HISTORY_BUDGET_BYTES=8000
+      d="$work/hg_cap"; echo "  step cap: exit=$(rc hg_cap)"
+      nt=$(grep -c '"kind":"loop_tool"' "$d/stub.log"); nf=$(grep -c '"kind":"loop_final"' "$d/stub.log")
+      [ "$nt" = 2 ] && [ "$nf" = 1 ] && pass "[stepcap+pruning] cap still limited the investigation to 3 model calls" || fail "[stepcap+pruning] $nt tool-turn and $nf final requests"
+      [ "$(rc hg_cap)" = 2 ] && has "$d/report.md" "investigation_truncated" && pass "[stepcap+pruning] capped investigation still ends incomplete (exit 2, investigation_truncated)" || fail "[stepcap+pruning] wrong outcome"
+      grep '"event":"session_cleanup"' "$d/run.jsonl" | grep -q '"abort":"ok".*"idle":true.*"delete":"ok"' && pass "[stepcap+pruning] session cleaned up" || fail "[stepcap+pruning] cleanup not confirmed"
+      make_repo "$work/repo-hg-hostile" HOSTILE=1
+      run_case hg_hostile report "$work/repo-hg-hostile" REVIEW_AGENTS=security REVIEW_HISTORY_BUDGET_BYTES=8000
+      d="$work/hg_hostile"; echo "  hostile repo: exit=$(rc hg_hostile)"
+      n=$(grep -c 'HOSTILE_' "$d/stub.log" || true); [ "$n" = 0 ] && pass "[hostile+pruning] no repository instruction text reached the model" || fail "[hostile+pruning] $n request(s) carried hostile text"
+      ls "$d" | grep -qi 'pwned' && fail "[hostile+pruning] hostile code left a file" || pass "[hostile+pruning] no hostile artifact in the output"
+      grep '"event":"history_pruning"' "$d/run.jsonl" | grep -q '"verdict":"ok"' && pass "[hostile+pruning] pruning verified" || fail "[hostile+pruning] pruning verdict missing"
+      ;;
+    history_broken)
+      # Pruning is configured but the plugin is broken in three different ways. Each must end the review incomplete and
+      # must not let any unpruned tool-enabled request reach the model.
+      make_repo "$work/repo-hb"
+      for v in loadfail inert hookfail; do
+        run_case "hb_$v" long "$work/repo-hb" REVIEW_AGENTS=code_quality REVIEW_MAX_RETRIES=0 REVIEW_INVESTIGATION_STEPS=8 STUB_CALLS=4 REVIEW_HISTORY_BUDGET_BYTES=8000 "CRL_COMPOSE_EXTRA=$rootn/tests/integration/compose.history-$v.yml"
+        d="$work/hb_$v"; echo "  [$v] exit=$(rc "hb_$v")"; sed -n '1,12p' "$d/report.md" | sed 's/^/    /'
+        grep -E '"event":"(attempt_failed|history_pruning)"' "$d/run.jsonl" | sed 's/"ts":"[^"]*",//' | cut -c1-300 | sed 's/^/    /'
+        [ "$(rc "hb_$v")" = 2 ] && pass "[$v] exit 2" || fail "[$v] exit code $(rc "hb_$v"), expected 2"
+        has "$d/report.md" "Verdict: not_determined" && pass "[$v] verdict is not_determined" || fail "[$v] wrong verdict"
+        tr=$(grep -c '"toolNames"' "$d/stub.log" 2>/dev/null); tr=${tr:-0}
+        [ "$tr" = 0 ] && pass "[$v] zero tool-enabled requests reached the model" || fail "[$v] $tr tool-enabled request(s) reached the model"
+        [ "$(grep -c '"event":"attempt_start"' "$d/run.jsonl")" = 1 ] && pass "[$v] no retry or fallback attempt" || fail "[$v] extra attempts"
+        grep '"event":"session_cleanup"' "$d/run.jsonl" | grep -q '"abort":"ok".*"idle":true.*"delete":"ok"' && pass "[$v] session cleaned up" || fail "[$v] cleanup not confirmed"
+        echo "    proxy: denied=$(grep -c '"event":"history_denied"' "$d/proxy.log") forwarded=$(grep -c '"event":"request"' "$d/proxy.log")"
+        teardown "hb_$v"
+      done
       ;;
     *) fail "unknown scenario: $s" ;;
   esac

@@ -9,7 +9,7 @@ const STATUS_BY_KIND: Readonly<Partial<Record<ErrorKind, number>>> = {
 };
 
 // OpenCode reports its own errors as objects with a fixed `name`. Only names from this list are kept (never `data`).
-const SDK_ERROR_NAMES: ReadonlySet<string> = new Set(["APIError", "MessageAbortedError", "MessageOutputLengthError", "ProviderAuthError", "UnknownError", "ContextOverflowError", "RetryBudgetExceeded", "CompactionObserved", "SessionNeverStarted", "TransportTimeoutError", "StepLimitExceeded", "ToolsetVerificationFailed"]);
+const SDK_ERROR_NAMES: ReadonlySet<string> = new Set(["APIError", "MessageAbortedError", "MessageOutputLengthError", "ProviderAuthError", "UnknownError", "ContextOverflowError", "RetryBudgetExceeded", "CompactionObserved", "SessionNeverStarted", "TransportTimeoutError", "StepLimitExceeded", "ToolsetVerificationFailed", "HistoryPruningFailed"]);
 
 /** Token usage an attempt is known to have consumed. `complete: false` means a lower bound (work was cut short). */
 export interface KnownUsage {

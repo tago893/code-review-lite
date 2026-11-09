@@ -10,6 +10,11 @@
 //   forwarded upstream counts, including each retry OpenCode makes on its own. When the budget is spent the proxy
 //   answers 403 with the error code "request_budget_exhausted" and forwards nothing. 403 is not retried by OpenCode and
 //   does not look like a context overflow, so it can neither loop nor trigger compaction.
+//   PROXY_REQUIRE_HISTORY=1 (set when the review is configured to prune tool-result history): a tool-enabled request must
+//   carry the header x-cra-history, which CRA's history plugin adds only after pruning succeeded for that very request.
+//   Without it the proxy answers 403 "history_pruning_inactive" and forwards nothing, so a missing, unloaded, crashed or
+//   bypassed plugin cannot send an unpruned conversation. PROXY_MAX_REQUEST_BYTES is an independent backstop: a
+//   tool-enabled request body above it gets the same refusal. Neither refusal counts against the request budget.
 //   With PROXY_LOG_BODIES=1 (tests only) request bodies are also appended to /logs/requests.jsonl so a test can
 //   check exactly what reached the model. Never enable that for real repositories.
 import http from "node:http";
@@ -50,6 +55,10 @@ const LISTEN_PORT = Number(process.env.PROXY_PORT ?? 8080);
 const DEFAULT_MAX_REQUESTS = 200;
 const MAX_REQUESTS = parseBudget(process.env.PROXY_MAX_REQUESTS);
 const budget = { used: 0, denied: 0 };
+const REQUIRE_HISTORY = process.env.PROXY_REQUIRE_HISTORY === "1";
+const MAX_REQUEST_BYTES = parseCeiling(process.env.PROXY_MAX_REQUEST_BYTES);
+const HISTORY_HEADER = "x-cra-history";
+const HISTORY_STAMP = /^[1-9]\d{0,6}$/;
 const MAX_ERROR_CAPTURE = 8192;
 const MAX_BODY = 1_000_000;
 const ALLOW = [
@@ -64,6 +73,23 @@ function parseBudget(raw) {
     process.exit(1);
   }
   return Number(raw);
+}
+
+function parseCeiling(raw) {
+  if (raw === undefined || raw === "") return undefined;
+  if (!/^[1-9]\d{3,8}$/.test(raw)) {
+    process.stderr.write("FATAL: PROXY_MAX_REQUEST_BYTES must be an integer of at least 1000\n");
+    process.exit(1);
+  }
+  return Number(raw);
+}
+
+/** Why a tool-enabled request must not be forwarded, or undefined. Pure: only the summary, the stamp header and the size. */
+function historyRefusal(summary, stamp, bytes) {
+  if (!summary.has_tools) return undefined;
+  if (REQUIRE_HISTORY && !(typeof stamp === "string" && HISTORY_STAMP.test(stamp))) return "unstamped";
+  if (MAX_REQUEST_BYTES !== undefined && bytes > MAX_REQUEST_BYTES) return "over_ceiling";
+  return undefined;
 }
 
 let counter = 0;
@@ -150,6 +176,15 @@ http
         res.end("request too large");
         return;
       }
+      const body = Buffer.concat(chunks);
+      const summary = req.method === "POST" ? describeBody(body) : {};
+      const refusal = req.method === "POST" ? historyRefusal(summary, req.headers[HISTORY_HEADER], body.length) : undefined;
+      if (refusal) {
+        log({ event: "history_denied", rid, method: req.method, path, reason: refusal, bytes: body.length, ceiling: MAX_REQUEST_BYTES ?? null, ...summary });
+        res.writeHead(403, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { type: "cra_history", code: "history_pruning_inactive", message: "CRA requires pruned tool-result history for this request" } }));
+        return;
+      }
       // The check and the increment run in one synchronous step, so concurrent requests cannot overshoot the budget.
       if (budget.used >= MAX_REQUESTS) {
         budget.denied += 1;
@@ -159,9 +194,7 @@ http
         return;
       }
       budget.used += 1;
-      const body = Buffer.concat(chunks);
-      const summary = req.method === "POST" ? describeBody(body) : {};
-      log({ event: "request", rid, method: req.method, path, budgetUsed: budget.used, budgetMax: MAX_REQUESTS, bytes: body.length, inbound_auth_discarded: Boolean(req.headers.authorization), ...summary });
+      log({ event: "request", rid, method: req.method, path, budgetUsed: budget.used, budgetMax: MAX_REQUESTS, bytes: body.length, inbound_auth_discarded: Boolean(req.headers.authorization), history_stamp: typeof req.headers[HISTORY_HEADER] === "string", ...summary });
       if (LOG_BODIES && req.method === "POST") {
         try { appendFileSync(BODY_LOG, `${JSON.stringify({ t: Date.now(), path, ...summary, body: body.toString("utf8") })}\n`); } catch { /* test aid only */ }
       }
@@ -196,4 +229,4 @@ http
       out.end(body);
     });
   })
-  .listen(LISTEN_PORT, "0.0.0.0", () => log({ event: "listening", port: LISTEN_PORT, upstream_host: upstream.host, log_bodies: LOG_BODIES, budget_max: MAX_REQUESTS }));
+  .listen(LISTEN_PORT, "0.0.0.0", () => log({ event: "listening", port: LISTEN_PORT, upstream_host: upstream.host, log_bodies: LOG_BODIES, budget_max: MAX_REQUESTS, require_history: REQUIRE_HISTORY, max_request_bytes: MAX_REQUEST_BYTES ?? null }));

@@ -13,6 +13,9 @@
 //   loop / loop_stubborn - an investigation that never ends by itself: it asks for a tool call on every request that still offers tools,
 //             and only answers with text when a request offers none (what a step cap forces). Each request is logged with
 //             its tool count, tool_choice and the tail of its last message, so a test can see what the cap did.
+//   long    - a scripted investigation of STUB_CALLS tool calls (default 20) on a BIGFILE fixture: an early read of src/users.ts,
+//             a forbidden bash call, an out-of-root read, paging through src/orders.ts, greps and lists, a re-read of
+//             src/users.ts near the end, then notes. Same script whatever the history looks like, so request sizes compare.
 //   ratelimit      - always HTTP 429 with retry-after: 1
 //   ratelimit_slow - always HTTP 429 with retry-after: 6
 // The stub checks that the proxy replaced the placeholder with STUB_EXPECT_KEY and prints whether it did.
@@ -112,6 +115,23 @@ function respond(body, res) {
     parts = offered ? toolTurn([picks[results % picks.length]]) : textTurn(PARTIAL_NOTES);
     setTimeout(() => sse(res, parts), 600); // a model takes time; this also keeps the cap's enforcement lag realistic
     return { kind, stream: wantsStream, toolResults: hasToolResults, tools: toolCount, toolChoice: body.tool_choice ?? null, messages: messages.length, lastRole: last?.role ?? null, told, lastTail: tail };
+  } else if (MODE === "long") {
+    const total = Number(process.env.STUB_CALLS ?? 20);
+    const results = messages.filter((m) => m.role === "tool").length;
+    const pruned = (JSON.stringify(messages).match(/\[cra:pruned/g) ?? []).length;
+    const page = (i) => ["cra_read", { path: "src/orders.ts", offset: 1 + 100 * (i % 7) }];
+    const pick = (i) => {
+      if (i === 0 || i === total - 2) return ["cra_read", { path: "src/users.ts" }]; // early evidence, then the exact re-read
+      if (i === total - 1) return ["cra_read", { path: "src/consumer.ts" }];
+      if (i === 2) return ["bash", { command: "touch /tmp/pwned", description: "attack" }];
+      if (i === 3) return ["cra_read", { path: "/etc/passwd" }];
+      if (i % 5 === 0) return ["cra_grep", { pattern: "ORDER_LINE_4", path: "src" }];
+      if (i % 7 === 0) return ["cra_list", { path: "src" }];
+      return page(i);
+    };
+    kind = results < total ? "long_tool" : "long_final";
+    parts = results < total ? toolTurn([pick(results)]) : textTurn(NOTES);
+    return (sse(res, parts), { kind, stream: wantsStream, toolResults: hasToolResults, messages: messages.length, toolMessages: results, prunedRefs: pruned });
   } else if (MODE === "workload") {
     // The scripted bounded-reading workload: page through a large unchanged file, grep across files, read an unchanged
     // consumer, then answer. Same steps whatever the tool names, so request sizes can be compared like for like.

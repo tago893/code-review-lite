@@ -24,6 +24,8 @@ services:
       - PROXY_ALLOW_LIVE
       - PROXY_LOG_BODIES
       - PROXY_MAX_REQUESTS
+      - PROXY_REQUIRE_HISTORY
+      - PROXY_MAX_REQUEST_BYTES
     networks: [internal, egress]
     volumes:
       - proxy_logs:/logs
@@ -40,6 +42,7 @@ services:
     command: [node, /stub.mjs]
     environment:
       - STUB_MODE
+      - STUB_CALLS
       - STUB_EXPECT_KEY=${GROQ_API_KEY:-}
     volumes:
       - ../tests/integration/stub-groq.mjs:/stub.mjs:ro
@@ -104,6 +107,7 @@ services:
       - REVIEW_MAX_RETRIES
       - REVIEW_DEADLINE_MINUTES
       - REVIEW_INVESTIGATION_STEPS
+      - REVIEW_HISTORY_BUDGET_BYTES
       - REVIEW_AGENTS
     volumes:
       - repo_ws:/repo:ro

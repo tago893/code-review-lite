@@ -3,6 +3,7 @@ import {
   driveSession, type DriverOptions, type MessageLike, type SessionApi, type SessionStatus, type TraceEvent,
 } from "../../src/agents/session-driver.js";
 import { classifyError } from "../../src/resilience/errors.js";
+import { EMPTY_HISTORY_STATE, type HistoryState } from "../../src/agents/history-stats.js";
 
 // A scripted OpenCode server on a virtual clock. `script` says what the session looks like at virtual time t.
 interface Script {
@@ -274,5 +275,79 @@ describe("driveSession: investigation step limit", () => {
     const error = await driveSession(s.api, input({ stepLimit: 2 }), s.opts, s.sink).catch((e: unknown) => e);
     expect(error).toMatchObject({ name: "StepLimitExceeded" });
     expect(s.state.t).toBeLessThanOrEqual(1000);
+  });
+});
+
+describe("driveSession: history pruning is verified, not assumed", () => {
+  const readStep = (n: number) => assistant([toolPart(`p${n}`, "read", "completed")], { finish: "tool-calls" });
+  const done = () => assistant([{ type: "text", text: "Notes." }]);
+  const state = (over: Partial<HistoryState> = {}): HistoryState => ({ ...EMPTY_HISTORY_STATE, loaded: true, ...over });
+  // The driver reads the counters once when the attempt starts and diffs later reads against that baseline.
+  const probe = (after: HistoryState, base: HistoryState = state()): { read: () => HistoryState } => {
+    let reads = 0;
+    return { read: () => (reads++ === 0 ? base : after) };
+  };
+  const serverWith = (after: HistoryState, base?: HistoryState) => {
+    const s = fakeServer({ status: () => undefined, messages: () => [user(), readStep(1), readStep(2), done()] });
+    return { ...s, opts: { ...s.opts, history: probe(after, base) } as DriverOptions };
+  };
+
+  it("passes when the plugin pruned for every model request, and reports the counters", async () => {
+    const s = serverWith(state({ prunes: 3, stamps: 3, maxToolResults: 2, maxKeptBytes: 900, savedBytes: 4000, lastPruned: 1 }));
+    await driveSession(s.api, input({ stepLimit: 5 }), s.opts, s.sink);
+    expect(s.trace.find((e) => e.name === "history_pruning")?.data).toMatchObject({ verdict: "ok", modelRequests: 3, prunes: 3, stamps: 3, errors: 0, maxKeptBytes: 900, savedBytes: 4000 });
+  });
+
+  it("fails the attempt, as a tooling error, when the plugin never ran (silent fail-open)", async () => {
+    const s = serverWith(state({ loaded: false }));
+    const error = await driveSession(s.api, input({ stepLimit: 5 }), s.opts, s.sink).catch((e: unknown) => e);
+    expect(error).toMatchObject({ name: "HistoryPruningFailed" });
+    expect(classifyError(error)).toEqual({ retryable: false, kind: "tooling" });
+    expect(s.trace.find((e) => e.name === "history_pruning")?.data).toMatchObject({ verdict: "not_invoked_for_every_request", prunes: 0 });
+    expect(s.state.calls.slice(-2)).toEqual(["abort", "delete"]);
+  });
+
+  it("fails when the plugin pruned for fewer requests than the model made", async () => {
+    const s = serverWith(state({ prunes: 2 }));
+    await expect(driveSession(s.api, input({ stepLimit: 5 }), s.opts, s.sink)).rejects.toMatchObject({ name: "HistoryPruningFailed" });
+  });
+
+  it("fails as soon as the plugin records an error, without waiting for the session to end", async () => {
+    const s = fakeServer({ status: () => ({ type: "busy" }), messages: () => [user(), readStep(1)] });
+    const opts: DriverOptions = { ...s.opts, history: probe(state({ errors: 1, prunes: 1 })) };
+    await expect(driveSession(s.api, input({ stepLimit: 5 }), opts, s.sink)).rejects.toMatchObject({ name: "HistoryPruningFailed" });
+    expect(s.state.t).toBeLessThanOrEqual(1000);
+  });
+
+  it("fails promptly, after the start grace, when the session is busy but no prune was ever recorded (silent hook failure)", async () => {
+    const s = fakeServer({ status: () => ({ type: "busy" }), messages: () => [user()] });
+    const opts: DriverOptions = { ...s.opts, history: probe(state()) };
+    const error = await driveSession(s.api, input({ stepLimit: 5 }), opts, s.sink).catch((e: unknown) => e);
+    expect(error).toMatchObject({ name: "HistoryPruningFailed" });
+    expect(classifyError(error)).toEqual({ retryable: false, kind: "tooling" });
+    expect(s.trace.find((e) => e.name === "history_pruning")?.data).toMatchObject({ verdict: "plugin_silent", prunes: 0 });
+    expect(s.state.t).toBeGreaterThanOrEqual(5000);
+    expect(s.state.t).toBeLessThanOrEqual(7000);
+    expect(s.state.calls.slice(-2)).toEqual(["abort", "delete"]);
+  });
+  it("counts only what happened during this attempt", async () => {
+    const s = serverWith(state({ prunes: 13, stamps: 13 }), state({ prunes: 10, stamps: 10 }));
+    await driveSession(s.api, input({ stepLimit: 5 }), s.opts, s.sink);
+    expect(s.trace.find((e) => e.name === "history_pruning")?.data).toMatchObject({ verdict: "ok", prunes: 3 });
+  });
+
+  it("does nothing when pruning is not configured or the session is not an investigation", async () => {
+    const plain = fakeServer({ status: () => undefined, messages: () => [user(), readStep(1), done()] });
+    await driveSession(plain.api, input({ stepLimit: 5 }), plain.opts, plain.sink);
+    expect(names(plain.trace)).not.toContain("history_pruning");
+    const coordinator = serverWith(state({ loaded: false }));
+    await driveSession(coordinator.api, input(), coordinator.opts, coordinator.sink);
+    expect(names(coordinator.trace)).not.toContain("history_pruning");
+  });
+
+  it("traces a hash of each stored tool result so a re-read can be compared with the original", async () => {
+    const s = fakeServer({ status: () => undefined, messages: () => [user(), readStep(1), done()] });
+    await driveSession(s.api, input({ stepLimit: 5 }), s.opts, s.sink);
+    expect(s.trace.find((e) => e.name === "tool_call")?.data).toMatchObject({ outputBytes: 3, outputSha256: "ba7816bf8f01" });
   });
 });

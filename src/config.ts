@@ -39,6 +39,8 @@ export interface SessionLifecycle {
   readonly maxPollFailures: number;
   /** Most agent steps (model calls) one reviewer investigation may take. See REVIEW_INVESTIGATION_STEPS. */
   readonly maxInvestigationSteps: number;
+  /** Bytes of tool-result bodies kept in full in each model request; older ones become short references. 0 = off (default). See REVIEW_HISTORY_BUDGET_BYTES. */
+  readonly historyBudgetBytes: number;
 }
 
 /** Agent-side config. It never holds the real Groq key: `groqBaseUrl` points at the credential proxy. */
@@ -110,6 +112,13 @@ function investigationSteps(value: string | undefined): number {
   return parseOrThrow(z.string().regex(/^\d+$/).transform(Number).refine((n) => n >= 1 && n <= 50, "REVIEW_INVESTIGATION_STEPS must be an integer from 1 to 50"), value.trim());
 }
 
+/** REVIEW_HISTORY_BUDGET_BYTES: 0 or unset = off. Otherwise 2000 to 500000 bytes of recent tool results kept in full per request. */
+function historyBudget(value: string | undefined): number {
+  if (value === undefined || value.trim() === "") return 0;
+  const message = "REVIEW_HISTORY_BUDGET_BYTES must be 0 (off) or an integer from 2000 to 500000";
+  return parseOrThrow(z.string().regex(/^\d+$/, message).transform(Number).refine((n) => n === 0 || (n >= 2000 && n <= 500000), message), value.trim());
+}
+
 /** REVIEW_MAX_RETRIES: whole-attempt retries per model. 0 to 5, default 2. At 0 an unsuccessful investigation is not restarted and there is no model fallback. */
 function maxRetries(value: string | undefined): number {
   if (value === undefined || value.trim() === "") return MAX_RETRIES;
@@ -161,6 +170,7 @@ export function loadConfig(env: Env): Config {
       pollMs: 1000, requestTimeoutMs: 30_000, startGraceMs: 30_000, cleanupWaitMs: 10_000,
       maxProviderRetries: sessionRetries(env["REVIEW_SESSION_RETRIES"]), maxPollFailures: 2,
       maxInvestigationSteps: investigationSteps(env["REVIEW_INVESTIGATION_STEPS"]),
+      historyBudgetBytes: historyBudget(env["REVIEW_HISTORY_BUDGET_BYTES"]),
     }),
   });
 }

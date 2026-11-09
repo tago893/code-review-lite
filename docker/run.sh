@@ -32,6 +32,14 @@ else
   export PROXY_ALLOW_LIVE=1
 fi
 
+# Tool-result history pruning (REVIEW_HISTORY_BUDGET_BYTES > 0) must not be able to fail open: the proxy then refuses any
+# tool-enabled request that CRA's plugin did not stamp as pruned, and refuses oversized ones (default 32000 bytes, just
+# under the ~34 KB request size at which a free-tier 8000 TPM limit was exceeded). Off by default: nothing changes.
+case "${REVIEW_HISTORY_BUDGET_BYTES:-0}" in
+  ''|0) ;;
+  *) export PROXY_REQUIRE_HISTORY=1; export PROXY_MAX_REQUEST_BYTES="${PROXY_MAX_REQUEST_BYTES:-32000}" ;;
+esac
+
 native() { (cd "$1" && (pwd -W 2>/dev/null || pwd)); }
 here="$(native "$(dirname "$0")")"
 export MSYS_NO_PATHCONV=1

@@ -1,13 +1,14 @@
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { SERVER_NAME } from "../mcp/ids.js";
 import { CONTEXT_ROOT } from "../workspace/permissions.js";
 import { verifyToolset, type ToolsetApi } from "./toolset.js";
 import { TRANSPORT_MARKER } from "../resilience/errors.js";
 import { sanitizeEnv } from "../safety/sanitize.js";
 import type { ExploreSession, LaunchOptions } from "./opencode.js";
+import { readHistoryState } from "./history-stats.js";
 import { driveSession, type DriverOptions, type MessageLike, type SessionApi, type SessionStatus } from "./session-driver.js";
 
 // The binding to the real OpenCode SDK, used only inside the agent container (the SDK is installed in that image,
@@ -22,6 +23,8 @@ const INVESTIGATOR = "investigator";
 /** The compiled MCP server, next to this directory in dist/. */
 const MCP_SERVER_PATH = fileURLToPath(new URL("../mcp/server.js", import.meta.url));
 const TOOLSET_WAIT_MS = 15_000;
+/** CRA's own history plugin, compiled next to this file. Registered only by trusted config below, and only when pruning is on. */
+const HISTORY_PLUGIN_PATH = fileURLToPath(new URL("./history-plugin.js", import.meta.url));
 
 /**
  * The investigator's whole system prompt. Setting `agent.<name>.prompt` REPLACES OpenCode's built-in coding-agent prompt
@@ -86,6 +89,8 @@ export async function launchOpenCode(options: LaunchOptions, processEnv: NodeJS.
   }
   const sdk = (await import(SDK_MODULE)) as SdkModule;
   Object.assign(process.env, TRUSTED_OPENCODE_ENV);
+  const history = historySetup(options.lifecycle.historyBudgetBytes);
+  if (history) Object.assign(process.env, history.env);
   // OpenCode's working directory is a fresh, empty, trusted directory, never the reviewed repository. Setting
   // OPENCODE_DISABLE_PROJECT_CONFIG alone is not enough: measured with 1.19.5, `.opencode/plugin/*.js` in the working
   // directory still executes when the first session starts. Repository files are reached by absolute path only.
@@ -100,6 +105,7 @@ export async function launchOpenCode(options: LaunchOptions, processEnv: NodeJS.
       // Trusted configuration passed inline; nothing here comes from the repository.
       mcp: { [SERVER_NAME]: { type: "local", command: [process.execPath, MCP_SERVER_PATH], environment: { CRA_MCP_ROOT: options.repoRoot, CRA_MCP_CONTEXT: CONTEXT_ROOT }, enabled: true } },
       agent: { [INVESTIGATOR]: { mode: "primary", description: "Bounded read-only code investigation", steps: options.lifecycle.maxInvestigationSteps, prompt: INVESTIGATOR_PROMPT } },
+      ...(history ? { plugin: [history.pluginUrl] } : {}),
       compaction: { auto: false, prune: false },
       share: "disabled",
       autoupdate: false,
@@ -119,6 +125,7 @@ export async function launchOpenCode(options: LaunchOptions, processEnv: NodeJS.
     cleanupWaitMs: options.lifecycle.cleanupWaitMs,
     maxProviderRetries: options.lifecycle.maxProviderRetries,
     maxPollFailures: options.lifecycle.maxPollFailures,
+    ...(history ? { history: { read: () => readHistoryState(history.stateFile) } } : {}),
   };
   const sink = options.onTrace ?? (() => undefined);
 
@@ -128,6 +135,20 @@ export async function launchOpenCode(options: LaunchOptions, processEnv: NodeJS.
       server.close();
     },
   };
+}
+
+/**
+ * History pruning is a trusted CRA plugin plus a state file it writes. With the budget at 0 nothing is registered and
+ * nothing changes. The plugin file must exist before OpenCode starts: OpenCode itself ignores a missing plugin
+ * silently, which would leave the review unpruned (the credential proxy and the driver are the other two guards).
+ */
+function historySetup(budgetBytes: number): { env: Record<string, string>; pluginUrl: string; stateFile: string } | undefined {
+  if (budgetBytes <= 0) return undefined;
+  if (!existsSync(HISTORY_PLUGIN_PATH)) {
+    throw Object.assign(new Error("history pruning is configured but the CRA history plugin is missing"), { name: "HistoryPruningFailed" });
+  }
+  const stateFile = join(mkdtempSync(join(tmpdir(), "cra-history-")), "state.jsonl");
+  return { env: { CRA_HISTORY_BUDGET_BYTES: String(budgetBytes), CRA_HISTORY_STATE_FILE: stateFile }, pluginUrl: pathToFileURL(HISTORY_PLUGIN_PATH).href, stateFile };
 }
 
 /**
