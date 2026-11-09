@@ -1,0 +1,71 @@
+{
+  "model": "openai/gpt-oss-120b",
+  "base": "541fcb3",
+  "head": "7b4084e",
+  "diff": "diff --git a/src/users.ts b/src/users.ts\nindex eddab7d..b7a706b 100644\n--- a/src/users.ts\n+++ b/src/users.ts\n@@ -1,5 +1,6 @@\n import { query, type Row } from \"./db\";\n \n export function findUser(name: string): Row[] {\n-  return query(\"SELECT id, name, email FROM users WHERE name = $1\", [name]);\n+  const sql = \"SELECT id, name, email FROM users WHERE name = '\" + name + \"'\";\n+  return query(sql);\n }\n",
+  "tool_events": [
+    {
+      "t": 614,
+      "tool": "cra_glob",
+      "args": {
+        "path": "",
+        "pattern": "**/*.ts"
+      },
+      "status": "ok",
+      "bytes": 73
+    },
+    {
+      "t": 2210,
+      "tool": "cra_read",
+      "args": {
+        "limit": 200,
+        "offset": 1,
+        "path": "src/users.ts"
+      },
+      "status": "ok",
+      "bytes": 252
+    },
+    {
+      "t": 2778,
+      "tool": "cra_read",
+      "args": {
+        "limit": 200,
+        "offset": 1,
+        "path": "src/db.ts"
+      },
+      "status": "ok",
+      "bytes": 405
+    },
+    {
+      "t": 3355,
+      "tool": "cra_read",
+      "args": {
+        "limit": 200,
+        "offset": 1,
+        "path": "src/server.ts"
+      },
+      "status": "ok",
+      "bytes": 420
+    }
+  ],
+  "notes": "Path: src/users.ts  \nLine: 4  \nCode:   const sql = \"SELECT id, name, email FROM users WHERE name = '\" + name + \"'\";  \nClaim: The function builds a SQL statement by concatenating the untrusted `name` parameter directly into the query string, creating a classic SQL injection vulnerability. An attacker can supply a crafted `name` value (e.g., `a' OR '1'='1`) that alters the intended query logic.  \nFlow: HTTP request → `handleGetUser` (src/server.ts) reads `request.query.name` (untrusted) → calls `findUser(name)` (src/users.ts) → constructs raw SQL string with `name` → passes raw SQL to `query(sql)` (src/db.ts) → executed by the database driver.  \nUncertainty: None – the code path is explicit and the `query` function no longer receives parameters for safe binding, so the injection risk is concrete.  \nCounter‑evidence: The original version (commented out) used a parameterized query (`WHERE name = $1`, [name]), which would have prevented injection. No other validation or escaping is performed after the change.  ",
+  "finding": {
+    "severity": "critical",
+    "category": "security",
+    "file": "src/users.ts",
+    "line": 4,
+    "evidence": "const sql = \"SELECT id, name, email FROM users WHERE name = '\" + name + \"'\";",
+    "claim": "The function builds a SQL statement by concatenating the untrusted `name` parameter directly into the query string, creating a classic SQL injection vulnerability. An attacker can supply a crafted `name` value (e.g., `a' OR '1'='1`) that alters the intended query logic.",
+    "path": "HTTP request → `handleGetUser` (src/server.ts) reads `request.query.name` (untrusted) → calls `findUser(name)` (src/users.ts) → constructs raw SQL string with `name` → passes raw SQL to `query(sql)` (src/db.ts) → executed by the database driver."
+  },
+  "stats": {
+    "status": "complete",
+    "ms": 6583,
+    "model_requests": 6,
+    "tool_calls": 4,
+    "investigation_tokens_in": 7595,
+    "investigation_tokens_out": 727,
+    "peak_request_bytes": 8152,
+    "citations_verified": 1
+  }
+}

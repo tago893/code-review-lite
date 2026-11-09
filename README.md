@@ -1,111 +1,119 @@
-# CRA (code-review-lite)
+# CRA: an experimental AI code reviewer
 
-A containerised AI code reviewer. It reviews the diff between two commits of a local Git repository with up to three
-reviewers (`code_quality`, `security`, `performance`), checks their findings, and writes a report. The model is called
-through a credential proxy; the agent container never holds your API key and can only read a sanitised snapshot.
+CRA reviews the diff between two commits of a Git repository. One LLM investigates the code with four **read-only** tools, writes
+its findings as structured JSON, and every finding is **checked against the real source** before it is reported.
 
-Status: V1. It works end to end on synthetic and small repositories. **Cross-file bug detection (a defect that shows up
-in an unchanged file because of the change) is not yet proven.** See "Known limits".
+> **Status: experimental.** It works on small, simple cases (below). It has **not** been shown to find complex or cross-file
+> bugs, and it is not production-ready. See [Limitations](#limitations).
 
-## Prerequisites
-- Docker Engine 28+ with Compose v2 (tested on Docker Desktop for Windows; Linux and macOS are untested).
-- A bash shell (Git Bash on Windows) and Git. Run everything from this repository's root.
-- A Groq API key. Network access is needed only for the first image build and for the model calls.
-- The repository you review must be a local Git checkout with a clean working tree and `HEAD` checked out.
+![CRA reviewing a seeded SQL injection](docs/assets/cra-demo.gif)
 
-No `npm install` is needed to run a review; the images build themselves.
+*A replay of one real run (`openai/gpt-oss-120b`, 6.6 s). The timestamps are real; the animation speed is not. Tool arguments are
+shown without their default `offset`/`limit`. The data behind it is in [`docs/assets/cra-demo-evidence.json`](docs/assets/cra-demo-evidence.json).*
 
-## Run a review
-```bash
-export GROQ_API_KEY=...                       # your shell only; passed to the proxy container by name
-export CRA_ALLOW_LIVE=1                       # explicit permission to spend real tokens
-export UPSTREAM_URL=https://api.groq.com      # explicit; the proxy has no default upstream
-export REVIEW_HISTORY_BUDGET_BYTES=8000       # recommended, see "Bounded history"
-export REVIEW_TIMEOUT_SCALE=3                 # recommended on the free tier
+## How it works
 
-bash docker/run.sh --repo /path/to/repo --base <base-commit> --head <head-commit> --out-dir ./review-out
 ```
-Add `REVIEW_AGENTS=security` (or a comma-separated subset) to run fewer reviewers. Without a key or without
-`CRA_ALLOW_LIVE=1` the script refuses to run live. Use `--keep` to keep the agent container for inspection.
-
-Exit codes: `0` complete review, `2` incomplete or failed (including a failed prepare step), `64` bad usage.
-
-## Environment variables
-| Variable | Default | Meaning |
-|---|---|---|
-| `GROQ_API_KEY` | required | Held only by the proxy container. |
-| `CRA_ALLOW_LIVE` / `UPSTREAM_URL` | required for live runs | Must be `1` and `https://api.groq.com`. |
-| `REVIEW_AGENTS` | all planned | Subset of `code_quality,security,performance`. The report says the run was restricted. |
-| `REVIEWER_MODEL` | `openai/gpt-oss-20b` | Model for the reviewers. |
-| `COORDINATOR_MODEL` / `VERIFIER_MODEL` / `FALLBACK_MODEL` | `openai/gpt-oss-120b` | Coordinator, verifier and retry fallback. |
-| `REVIEW_INVESTIGATION_STEPS` | 10 (1-50) | Most model calls one reviewer investigation may take. |
-| `REVIEW_HISTORY_BUDGET_BYTES` | 0 = off (or 2000-500000) | See "Bounded history". |
-| `REVIEW_MAX_RETRIES` | 2 (0-5) | Whole-investigation retries per model. At 0: one attempt, no fallback model. |
-| `REVIEW_SESSION_RETRIES` | 5 (1-20) | Retries of one failing provider call inside an attempt. |
-| `REVIEW_DEADLINE_MINUTES` | 25 x scale (1-240) | Hard run-wide deadline; on expiry the run is cancelled, cleaned up and incomplete. |
-| `REVIEW_TIMEOUT_SCALE` | 1 (1-10) | Multiplies task and overall timeouts, for low tokens-per-minute tiers. |
-| `PROXY_MAX_REQUESTS` | 200 | Hard cap on provider requests per run. |
-
-## Bounded history
-Each model request normally re-sends every earlier tool result, so a long investigation grows and can exceed the
-free-tier limit (HTTP 413). With `REVIEW_HISTORY_BUDGET_BYTES=8000`, only the newest tool results that fit 8,000 bytes
-are sent in full; older ones become a short reference (tool, path, line range, size, hash) and the model repeats the
-call if it needs them again. In scripted runs this cut the largest request from 171 KB to 28 KB over 40 tool calls.
-Bytes are not tokens, and the feature has not yet been evaluated with a real model.
-
-**Pruning-enabled runs must use `docker/run.sh`.** It switches on the proxy protections that make pruning fail closed:
-the proxy refuses tool-enabled requests that the pruning plugin did not stamp, and requests over
-`PROXY_MAX_REQUEST_BYTES` (default 32000 when pruning is on). Invoking Compose directly with the budget set does not
-enable these, so a broken plugin could then send full history (the driver would still fail the attempt, but after the
-fact). If pruning cannot run, the review ends incomplete; it never silently continues unpruned.
-
-## Output
-`--out-dir` (default `./review-out`) receives:
-- `report.md` — completion, verdict, reasons and findings (file, line, evidence, severity).
-- `metrics.json` — token usage (a lower bound when the provider reported none), findings counts, retries, fallbacks, duration.
-- `run.jsonl` — the execution log: attempts, every tool call (tool, path, sizes, hashes), step counts, retry and
-  cleanup decisions, and `history_pruning` counters. No source text or key.
-- `proxy.log` — request sizes, rate-limit headers, 413/429 facts. No request bodies.
-
-## Reading the result
-- **Completion `complete`**: every planned reviewer finished. The verdict is one of `approved`, `approved_with_comments`
-  (suggestions or one warning), `minor_issues` (two or more warnings), `significant_concerns` (an independently
-  confirmed critical finding). Exit 0.
-- **Completion `incomplete`, verdict `not_determined`**: the review did not finish (step limit, rate limit/413, request
-  budget, deadline, tooling or pruning failure, cancelled). **This is not an approval and not a finding of no bugs.**
-  The report names the reason (for example `investigation_truncated`, `model_budget`, `model_tooling`). Findings listed
-  are partial. Exit 2.
-- A restricted run (`REVIEW_AGENTS`) says so in the report's Notes; it is not a full review.
-- `approved` means no confirmed problem was found by the reviewers that ran, not that the change is correct.
-
-## Demonstration (seeded SQL injection)
-A tiny synthetic repository with one seeded SQL injection (`src/users.ts` line 4, reached from an unchanged route in
-`src/server.ts`). Nothing real is sent to the model.
-```bash
-export GROQ_API_KEY=...  CRA_ALLOW_LIVE=1  UPSTREAM_URL=https://api.groq.com
-export REVIEW_HISTORY_BUDGET_BYTES=8000 REVIEW_TIMEOUT_SCALE=3 REVIEW_AGENTS=security
-
-eval "$(bash tests/integration/make-fixture-repo.sh ./demo-repo | sed 's/^/export /')"   # sets BASE and HEAD
-bash docker/run.sh --repo ./demo-repo --base "$BASE" --head "$HEAD" --out-dir ./demo-out
-cat ./demo-out/report.md
+ your Git repo ──► prep container ──► sanitised, read-only snapshot + diff
+                                              │
+   Groq API ◄── credential proxy ◄── agent container (no key, no internet)
+   (holds the key,                      │
+    caps requests)                      ├─ 1. investigate: model ⇄ 4 read-only tools (bounded loop)
+                                        ├─ 2. write findings: one more model call, no tools, strict JSON schema
+                                        └─ 3. verify: file, line and quoted code must exist in the snapshot
+                                                  ▼
+                                         lean-findings.json + lean-trace.jsonl
 ```
-A good result is a `significant_concerns` verdict with a critical SQL-injection finding in `src/users.ts` and exit 0, but
-that is an expected result, not a guarantee: models vary, and the run can end incomplete (exit 2). On the free tier it
-takes many minutes because of the 8,000 tokens-per-minute limit. The synthetic source is sent to Groq.
 
-## Known limits
-- **Groq free tier**: 8,000 tokens per minute. Three reviewers do not fit even on tiny diffs; use `REVIEW_AGENTS` and
-  `REVIEW_TIMEOUT_SCALE`. Larger investigations can hit HTTP 413 or 429 and end incomplete. A paid tier raises the rate
-  limits, but it does not by itself stop the conversation from growing with every tool call; bounded history addresses
-  that separately, and long investigations still grow slowly.
-- **Cross-file bugs are unproven.** Three Case 001 runs (a defect in an unchanged file that violates a contract of the
-  changed code) all ended incomplete, so no detection or miss has been established. The SQL-injection demo is a
-  same-diff, single-flow bug.
-- Pruning has been verified with scripted models only.
-- A model that misses a bug yields `approved` for what it examined; the pipeline cannot tell a miss from a clean diff.
-- Your source is sent to the hosted model provider (Groq) in every live run, including the synthetic demo repository.
-  Send only repositories you are willing to share.
+- **One reviewer, one loop.** The loop has a turn limit, a request-size budget (older tool results shrink to short references), a hard
+  deadline, and bounded retries only for HTTP 429 and for one corrective retry after Groq's `tool_use_failed`.
+- **Four tools, nothing else.** The model cannot write files, run commands or reach the network.
 
-## More detail
-`docs/workspace-security.md` (isolation and threat model), `docs/execution-lifecycle.md` (retries, deadlines, step
-caps), `docs/DEVELOPMENT_HANDOFF.md` (current state), `tests/integration/README.md` (provider-free scenarios).
+  | Tool | Does |
+  |---|---|
+  | `cra_read` | Read a text file in chunks, with real line numbers |
+  | `cra_grep` | Search file contents (regex or literal) |
+  | `cra_glob` | Find files by pattern |
+  | `cra_list` | List one directory |
+
+- **Security boundaries.** The agent sees a sanitised copy of the repository, with secrets withheld, symlinks refused and paths
+  contained. Your API key lives only in the proxy container. Repository text is treated as data, not instructions.
+  Details: [`docs/workspace-security.md`](docs/workspace-security.md).
+- **Honest outcomes.** A review is `complete` or `incomplete`, with a reason code such as `step_limit`, `deadline` or
+  `provider_429_rate_limit_exceeded`. An incomplete review never reports "no problems".
+
+The code is in [`experiments/lean/`](experiments/lean/) (about 530 lines). It reuses the tool code, history pruning, schema and citation
+verifier from `src/`.
+
+## Example finding (from the run in the GIF)
+
+```
+CRITICAL  security  src/users.ts:4   (citation verified)
+  const sql = "SELECT id, name, email FROM users WHERE name = '" + name + "'";
+  The function builds a SQL statement by concatenating the untrusted `name` parameter directly into the query string ...
+  Flow: HTTP request -> handleGetUser (src/server.ts) -> findUser(name) (src/users.ts) -> query(sql) (src/db.ts)
+```
+
+The model made 4 tool calls (a glob, then reads of `src/users.ts`, `src/db.ts` and `src/server.ts`) and 6 model requests in total.
+The seeded bug is a synthetic one-line change; this is an easy case.
+
+## Run the same demonstration
+
+You need Docker (Compose v2), Git, Node 18+, a bash shell, and a [Groq API key](https://console.groq.com). The free tier is enough for
+this demo, and the synthetic source is sent to Groq.
+
+```bash
+npm ci
+npx tsc -p experiments/lean/tsconfig.json                 # compiles the reviewer into dist-lean/
+
+bash tests/integration/make-fixture-repo.sh ./demo-repo   # prints BASE=... and HEAD=... (a repo with one seeded bug)
+
+export GROQ_API_KEY=...                                   # your shell only; the proxy container receives it by name
+export CRA_ALLOW_LIVE=1 UPSTREAM_URL=https://api.groq.com # explicit consent to make real, billable calls
+export REVIEWER_MODEL=openai/gpt-oss-120b PROXY_MAX_REQUESTS=40 PROXY_MAX_REQUEST_BYTES=32000 REVIEW_DEADLINE_MINUTES=10
+export CRL_COMPOSE_EXTRA="$(pwd -W 2>/dev/null || pwd)/experiments/lean/compose.lean.yml"   # runs the lean reviewer in the agent container
+
+bash docker/run.sh --repo ./demo-repo --base <BASE> --head <HEAD> --out-dir ./demo-out
+cat ./demo-out/lean-findings.json                         # status, verified findings, token counts
+cat ./demo-out/lean-trace.jsonl                           # one line per request, tool call, retry and error (no source text)
+```
+
+Exit codes: `0` complete, `2` incomplete or failed, `64` bad usage. The reviewer uses the `security` prompt by default; the compose file
+sets it.
+
+**No key? Run it offline.** The same containers run against a scripted stub instead of a model (this checks the plumbing, not review quality):
+
+```bash
+mkdir -p ./lean-work && bash experiments/lean/e2e.sh ./lean-work report   # also: attack long long429 error
+npx vitest run tests/lean                                                 # unit tests, no Docker
+```
+
+## What has been tried
+
+| Run | Result |
+|---|---|
+| Seeded SQL injection, `gpt-oss-120b`, lean reviewer (two live runs) | Complete in 6.6 s and 13 s. One finding each at `src/users.ts:4`, citation verified |
+| Event-booking benchmark, cross-file regression, lean reviewer (two live runs) | **Incomplete both times.** First a provider `tool_use_failed` error, then Groq free-tier rate limits. No finding, and no detection or miss was established |
+| Earlier OpenCode-based pipeline (three live runs of the SQL demo) | Incomplete all three times: a retry-handling bug (fixed), one unexplained error, and a malformed tool call from the model |
+
+## Limitations
+
+- **Complex bugs are unproven.** The one harder case tried (a change that breaks an unchanged caller) never finished, so nothing can be
+  claimed about cross-file detection.
+- **Small evidence base.** The successful runs are on a tiny synthetic repository with a textbook bug.
+- **Provider limits.** The Groq free tier allows about 8,000 tokens per minute. A review that needs more than a few model calls spends most of its
+  time waiting and can run out of retries.
+- **Model reliability.** `gpt-oss-120b` sometimes emits malformed tool calls. There is one corrective retry per run, which has not yet been seen
+  working against the live provider (it is covered by offline tests only).
+- **Misses look like clean reviews.** If the model overlooks a bug in a completed review, nothing in the pipeline can tell.
+- **Your code leaves your machine.** Every live run sends the reviewed source to the hosted model provider. Only review code you are
+  willing to share.
+
+## Repository layout
+
+- `experiments/lean/`: the lean single-reviewer loop, its container overlay and the offline Docker check.
+- `src/`, `docker/`, `prompts/`: shared pieces (tools, schema, citation verifier, prep, proxy, prompts) and the original
+  OpenCode multi-reviewer pipeline, documented in [`docs/OPENCODE_PIPELINE.md`](docs/OPENCODE_PIPELINE.md) and kept in Git history.
+- `tests/lean/`: the lean reviewer's tests.
+- `docs/assets/`: the demo GIF, its evidence file, and the scripts that produce them
+  (`python docs/assets/extract_demo_evidence.py ...` then `python docs/assets/render_demo_gif.py`; needs Pillow).
