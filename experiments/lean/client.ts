@@ -9,8 +9,17 @@ const WORD = /^[a-z_]{1,40}$/;
 const DEFAULT_WAIT_MS = 2_000;
 const MAX_WAIT_MS = 60_000;
 
+/** What kind of tool-call rejection Groq reported, as fixed words. Nothing from the provider body is kept except these. */
+type NameShape = "valid_name" | "garbled_read" | "garbled_grep" | "garbled_glob" | "garbled_list" | "garbled_other" | "other_plain_name";
+
+export interface ToolUseFailure {
+  readonly kind: "unknown_tool" | "bad_arguments" | "unspecified";
+  /** For unknown_tool: the shape of the rejected tool name, never the name itself. */
+  readonly nameShape?: NameShape;
+}
+
 export class ProviderError extends Error {
-  constructor(readonly status: number, readonly code: string, readonly errorType: string, readonly retries: number) {
+  constructor(readonly status: number, readonly code: string, readonly errorType: string, readonly retries: number, readonly toolUse?: ToolUseFailure) {
     super(`provider_${status}_${code}`);
     this.name = "ProviderError";
   }
@@ -48,7 +57,7 @@ export function createChat(options: ClientOptions): ChatFn {
       const response = await send(fetchFn, url, payload, options.signal, attempt);
       if (response.ok) return Object.freeze({ json: parse(await response.text(), response.status, attempt), retries: attempt });
       const facts = errorFacts(await response.text().catch(() => ""));
-      if (response.status !== 429 || attempt >= perCall || used >= total) throw new ProviderError(response.status, facts.code, facts.type, attempt);
+      if (response.status !== 429 || attempt >= perCall || used >= total) throw new ProviderError(response.status, facts.code, facts.type, attempt, facts.toolUse);
       const waitMs = Math.min(retryAfterMs(response.headers) ?? DEFAULT_WAIT_MS * 2 ** attempt, MAX_WAIT_MS);
       used += 1;
       options.onRetry?.({ retryNo: used, waitMs });
@@ -80,14 +89,31 @@ function parse(text: string, status: number, retries: number): unknown {
   }
 }
 
-function errorFacts(text: string): { code: string; type: string } {
+function errorFacts(text: string): { code: string; type: string; toolUse?: ToolUseFailure } {
   try {
-    const error = (JSON.parse(text) as { error?: { code?: unknown; type?: unknown } }).error ?? {};
+    const error = (JSON.parse(text) as { error?: { code?: unknown; type?: unknown; message?: unknown } }).error ?? {};
     const word = (v: unknown): string => (typeof v === "string" && WORD.test(v) ? v : "unknown");
-    return { code: word(error.code), type: word(error.type) };
+    const code = word(error.code);
+    // failed_generation (the model's raw output) is never read. Only the fixed shape of the message is classified.
+    return { code, type: word(error.type), ...(code === "tool_use_failed" ? { toolUse: classifyToolUse(error.message) } : {}) };
   } catch {
     return { code: "unknown", type: "unknown" };
   }
+}
+
+const REJECTED_TOOL = /attempted to call tool '([^']{0,80})' which was not in request\.tools/;
+const OFFERED_TOOL = /^cra_(read|grep|glob|list)$/;
+
+function classifyToolUse(message: unknown): ToolUseFailure {
+  const text = typeof message === "string" ? message.slice(0, 1_000) : "";
+  const rejected = REJECTED_TOOL.exec(text)?.[1];
+  if (rejected !== undefined) {
+    if (OFFERED_TOOL.test(rejected)) return { kind: "unknown_tool", nameShape: "valid_name" };
+    const near = /^cra_(read|grep|glob|list)/.exec(rejected);
+    if (near) return { kind: "unknown_tool", nameShape: `garbled_${near[1]}` as NameShape };
+    return { kind: "unknown_tool", nameShape: /^[a-z_]{1,40}$/.test(rejected) ? "other_plain_name" : "garbled_other" };
+  }
+  return /parameters for tool|did not match schema|validation failed/i.test(text) ? { kind: "bad_arguments" } : { kind: "unspecified" };
 }
 
 function retryAfterMs(headers: { get(name: string): string | null }): number | undefined {

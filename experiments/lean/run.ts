@@ -8,7 +8,7 @@ import type { Category, Finding } from "../../src/types.js";
 import { verifyCitation } from "../../src/verify/citation.js";
 import { gateForModel } from "../../src/workspace/gate.js";
 import { loadReviewContext } from "../../src/workspace/review-context.js";
-import { createChat, ProviderError, type ChatFn } from "./client.js";
+import { createChat, ProviderError, type ChatFn, type ToolUseFailure } from "./client.js";
 import { investigate, type TraceEvent } from "./loop.js";
 
 // Lean reviewer: one model, one bounded tool loop (investigate), then one separate structured call with no tools.
@@ -41,6 +41,10 @@ export interface LeanResult {
   readonly turns: number;
   readonly tokensIn: number;
   readonly tokensOut: number;
+  /** True when the one tool_use_failed recovery was started (its request can still be stopped by the size budget or deadline). */
+  readonly recoveryAttempted: boolean;
+  /** Why the provider rejected a tool call (fixed words), when it did. */
+  readonly diagnostic?: ToolUseFailure;
 }
 
 const PHASE2_HEADING = /^## Phase 2\b.*$/m;
@@ -51,7 +55,7 @@ export async function reviewLean(o: LeanOptions): Promise<LeanResult> {
   const context = await loadReviewContext(o.ctx, o.repo, o.prompts);
   const base = { baseSha: context.meta.baseSha, headSha: context.meta.headSha };
   const stop = (reason: string, extra: Partial<LeanResult> = {}): LeanResult =>
-    Object.freeze({ status: "incomplete", reason, findings: [], dropped: [], turns: 0, tokensIn: 0, tokensOut: 0, ...base, ...extra });
+    Object.freeze({ status: "incomplete", reason, findings: [], dropped: [], turns: 0, tokensIn: 0, tokensOut: 0, recoveryAttempted: false, ...base, ...extra });
 
   const [shared, category, sharedContext] = await Promise.all([
     readFile(join(o.prompts, "REVIEWER_SHARED.md"), "utf8"),
@@ -66,7 +70,7 @@ export async function reviewLean(o: LeanOptions): Promise<LeanResult> {
   const system = `${shared.slice(0, split)}\n${category}\n\n${TOOL_NOTE}`;
   const user = [`Per-file patches are in ${context.paths.patchDir}. The change under review:`, "<shared_context>", gatedContext.text, "</shared_context>", "Investigate now. When done, reply with your Phase 1 notes (plain text, no tool call)."].join("\n\n");
   const phase1 = await investigate({ chat: o.chat, model: o.model, system, user, roots, maxTurns: o.maxTurns, maxRequestBytes: o.maxRequestBytes, historyBytes: o.historyBytes, maxForbiddenToolCalls: o.maxForbiddenToolCalls, onEvent: o.onEvent, ...(o.signal ? { signal: o.signal } : {}) });
-  const usage = { turns: phase1.turns, tokensIn: phase1.tokensIn, tokensOut: phase1.tokensOut };
+  const usage = { turns: phase1.turns, tokensIn: phase1.tokensIn, tokensOut: phase1.tokensOut, recoveryAttempted: phase1.recoveryAttempted, ...(phase1.diagnostic ? { diagnostic: phase1.diagnostic } : {}) };
   if (phase1.status === "incomplete") return stop(phase1.reason ?? "incomplete", usage);
 
   const notes = gateForModel("phase2_notes", phase1.notes);
