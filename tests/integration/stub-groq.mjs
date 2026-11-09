@@ -54,7 +54,18 @@ function chunk(delta, finish, usage) {
 }
 const USAGE = { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 };
 
+// A request without stream:true (the lean reviewer, experiments/lean) gets one ordinary JSON completion built from the same parts.
+let nonStream = false;
+function plain(res, parts) {
+  const message = { role: "assistant", content: parts.map((p) => p.choices[0].delta.content ?? "").join("") || null };
+  const calls = parts.flatMap((p) => p.choices[0].delta.tool_calls ?? []).map(({ index, ...call }) => call);
+  if (calls.length > 0) message.tool_calls = calls;
+  const finish = parts.map((p) => p.choices[0].finish_reason).filter(Boolean).pop() ?? "stop";
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify({ id: "stub-1", object: "chat.completion", created: 1, model: "stub", choices: [{ index: 0, message, finish_reason: finish }], usage: parts.map((p) => p.usage).filter(Boolean).pop() }));
+}
 function sse(res, parts) {
+  if (nonStream) return plain(res, parts);
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
   for (const p of parts) res.write(`data: ${JSON.stringify(p)}\n\n`);
   res.write("data: [DONE]\n\n");
@@ -86,6 +97,7 @@ function respond(body, res) {
   const hasToolResults = messages.some((m) => m.role === "tool");
   const structured = body.response_format !== undefined;
   const wantsStream = body.stream === true;
+  nonStream = !wantsStream;
   const system = String(messages[0]?.content ?? "");
 
   let kind; let parts; let json;

@@ -1,0 +1,28 @@
+# Experiment only. Used as CRL_COMPOSE_EXTRA with docker/run.sh: the same prep, proxy and agent containers (same
+# hardening, same networks, same read-only snapshot), but the agent runs the lean reviewer instead of the OpenCode CLI.
+# The compiled experiment (npm run in experiments/lean: tsc -p experiments/lean/tsconfig.json) is mounted read-only, so
+# the agent image is not rebuilt and the production Dockerfile is untouched. Paths here are relative to docker/.
+services:
+  agent:
+    command:
+      - node
+      - /opt/crl/lean/experiments/lean/run.js
+      - --repo
+      - /repo
+      - --ctx
+      - /review/context
+      - --prompts
+      - /opt/crl/prompts
+      - --out
+      - /review/out
+      - --category
+      - security
+    environment:
+      - LEAN_REQUEST_BUDGET_BYTES
+      - LEAN_HISTORY_BYTES
+      - LEAN_MAX_FORBIDDEN_CALLS
+    volumes:
+      - ../dist-lean:/opt/crl/lean:ro
+  stub:
+    environment:
+      - STUB_429_AT
