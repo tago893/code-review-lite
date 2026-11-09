@@ -16,12 +16,16 @@
 //   long    - a scripted investigation of STUB_CALLS tool calls (default 20) on a BIGFILE fixture: an early read of src/users.ts,
 //             a forbidden bash call, an out-of-root read, paging through src/orders.ts, greps and lists, a re-read of
 //             src/users.ts near the end, then notes. Same script whatever the history looks like, so request sizes compare.
+//             With STUB_429_AT=<n> the FIRST request that arrives after n tool results is answered with one HTTP 429
+//             (retry-after 5); everything else is unchanged. Each request line carries bodySha, so an identical retry is visible.
 //   ratelimit      - always HTTP 429 with retry-after: 1
 //   ratelimit_slow - always HTTP 429 with retry-after: 6
 // The stub checks that the proxy replaced the placeholder with STUB_EXPECT_KEY and prints whether it did.
 import http from "node:http";
+import { createHash } from "node:crypto";
 
 const MODE = process.env.STUB_MODE ?? "obey";
+const state = { served429: false };
 const EXPECT = process.env.STUB_EXPECT_KEY ?? "";
 const log = (record) => process.stdout.write(`${JSON.stringify({ t: Date.now(), mode: MODE, ...record })}\n`);
 
@@ -129,6 +133,13 @@ function respond(body, res) {
       if (i % 7 === 0) return ["cra_list", { path: "src" }];
       return page(i);
     };
+    const at = process.env.STUB_429_AT;
+    if (at !== undefined && at !== "" && !state.served429 && results === Number(at)) {
+      state.served429 = true;
+      res.writeHead(429, { "content-type": "application/json", "retry-after": "5" });
+      res.end(JSON.stringify({ error: { message: "Rate limit reached for model `openai/gpt-oss-20b` on tokens per minute (TPM): Limit 8000, Used 6495, Requested 2101. Please try again in 5s.", type: "tokens", code: "rate_limit_exceeded" } }));
+      return { kind: "long_429", stream: wantsStream, toolResults: hasToolResults, messages: messages.length, toolMessages: results, answered: 429 };
+    }
     kind = results < total ? "long_tool" : "long_final";
     parts = results < total ? toolTurn([pick(results)]) : textTurn(NOTES);
     return (sse(res, parts), { kind, stream: wantsStream, toolResults: hasToolResults, messages: messages.length, toolMessages: results, prunedRefs: pruned });
@@ -193,7 +204,8 @@ http
       // Names of any HOSTILE_*_MARKER (tests/integration/hostile-files.mjs) that reached the model, to prove what did not.
       const markers = [...new Set(Buffer.concat(chunks).toString("utf8").match(/HOSTILE_[A-Z_]+_MARKER/g) ?? [])];
       const toolNames = Array.isArray(body.tools) ? body.tools.map((t) => t?.function?.name ?? t?.name) : [];
-      log({ event: "request", path: req.url, keyInjected, ...info, ...(toolNames.length > 0 ? { toolNames } : {}), ...(markers.length > 0 ? { markers } : {}) });
+      const bodySha = createHash("sha256").update(Buffer.concat(chunks)).digest("hex").slice(0, 12);
+      log({ event: "request", path: req.url, keyInjected, bodySha, ...info, ...(toolNames.length > 0 ? { toolNames } : {}), ...(markers.length > 0 ? { markers } : {}) });
     });
   })
   .listen(9000, "0.0.0.0", () => log({ event: "listening", port: 9000 }));

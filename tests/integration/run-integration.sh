@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Real-container integration scenarios with a scripted model (no provider key, no network).
-#   tests/integration/run-integration.sh <work-dir> [scenario...]      scenarios: attack obey report error overflow ratelimit abandon deadline stepcap stepcap_stubborn hostile mcpdown budget budget_stubborn offline workload history history_long history_guard history_broken
+#   tests/integration/run-integration.sh <work-dir> [scenario...]      scenarios: attack obey report error overflow ratelimit abandon deadline stepcap stepcap_stubborn hostile mcpdown budget budget_stubborn offline workload history history_long history_guard history_broken history_retry
 # Every scenario runs the real CLI, the real OpenCode SDK, the real prep/agent/proxy containers and the real
 # network topology. Only the model is replaced, by tests/integration/stub-groq.mjs behind the real proxy, which
 # holds a recognisable DUMMY key (never a real one) so key handling can be asserted.
@@ -391,6 +391,28 @@ for s in "${scenarios[@]}"; do
         echo "    proxy: denied=$(grep -c '"event":"history_denied"' "$d/proxy.log") forwarded=$(grep -c '"event":"request"' "$d/proxy.log")"
         teardown "hb_$v"
       done
+      ;;
+    history_retry)
+      # Provider-free reproduction of the v1-demo2 UnknownError: a stamped request gets one 429, OpenCode retries the same
+      # request (no new pruning hook), the proxy authorises the identical retry, the stub answers 200 with a tool call.
+      # CONTROL: the same script with no 429. OpenCode's data and log directory is redirected into /review/out/oc so its own
+      # diagnostic log survives the container. Synthetic source and stub responses only.
+      make_repo "$work/repo-hr" BIGFILE=1
+      for v in control r429; do
+        run_case "hr_$v" long "$work/repo-hr" REVIEW_AGENTS=code_quality REVIEW_MAX_RETRIES=0 REVIEW_SESSION_RETRIES=2 REVIEW_INVESTIGATION_STEPS=12 STUB_CALLS=8 PROXY_MAX_REQUESTS=40 REVIEW_HISTORY_BUDGET_BYTES=8000 "CRL_COMPOSE_EXTRA=$rootn/tests/integration/compose.retry-$v.yml"
+        d="$work/hr_$v"; echo "  [$v] exit=$(rc "hr_$v")"
+        grep -E '"event":"(session_retry|attempt_failed|history_pruning|investigation_steps)"' "$d/run.jsonl" | sed 's/"ts":"[^"]*",//;s/"sessionId":"[^"]*",//' | cut -c1-300 | sed 's/^/    /'
+        grep -E '"event":"(history_retry_window|history_retry_authorized|history_denied|provider_error)"' "$d/proxy.log" | sed 's/"t":[0-9]*,//' | cut -c1-260 | sed 's/^/    proxy: /'
+        echo "    stub requests (kind, answered, bodySha):"; grep '"event":"request"' "$d/stub.log" | grep -o '"bodySha":"[0-9a-f]*"\|"kind":"[a-z_]*"\|"answered":[0-9]*' | paste -sd' ' - | sed 's/"bodySha"/\n      "bodySha"/g' | sed 's/^/    /' | head -20
+        [ -d "$d/oc" ] && echo "    opencode data dir preserved: $(find "$d/oc" -type f | wc -l) files" || echo "    opencode data dir NOT preserved"
+        for lf in $(find "$d/oc" -name '*.log' 2>/dev/null | sort | tail -1); do echo "    -- opencode log $(basename "$lf"): $(wc -l <"$lf") lines; lines with ERROR/WARN/UnknownError:"; grep -nE 'ERROR|WARN|UnknownError|Error:' "$lf" | cut -c1-400 | head -25 | sed 's/^/       /'; done
+      done
+      sa=$(grep '"event":"request"' "$work/hr_r429/stub.log" | grep -c '"answered":429'); [ "$sa" = 1 ] && pass "the stub answered exactly one 429" || fail "429 count $sa"
+      grep -q '"event":"history_retry_authorized"' "$work/hr_r429/proxy.log" && pass "the proxy authorised an identical unstamped retry" || fail "no retry authorisation"
+      first=$(grep '"event":"request"' "$work/hr_r429/stub.log" | grep '"answered":429' | grep -o '"bodySha":"[0-9a-f]*"'); same=$(grep '"event":"request"' "$work/hr_r429/stub.log" | grep -c -F -- "$first")
+      [ "$same" = 2 ] && pass "the retried request reached the stub byte-identical to the 429'd one ($first)" || fail "retry was not byte-identical (matches: $same)"
+      [ "$(rc hr_control)" = 0 ] && pass "control (no 429) completed" || fail "control exit $(rc hr_control)"
+      [ "$(rc hr_r429)" = 0 ] && pass "429 + retry run completed" || fail "429 + retry run exit $(rc hr_r429)"
       ;;
     *) fail "unknown scenario: $s" ;;
   esac

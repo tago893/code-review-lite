@@ -1,0 +1,5 @@
+# Test only (history_retry, control): OpenCode's data and log directory goes to /review/out/oc so its own log survives the container.
+services:
+  agent:
+    environment:
+      - XDG_DATA_HOME=/review/out/oc
