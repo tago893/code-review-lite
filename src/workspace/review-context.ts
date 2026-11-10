@@ -15,8 +15,13 @@ const READY = "READY";
 const MAX_PATCH_NAME = 180;
 
 export interface ContextMeta {
+  /** The commit the change is reviewed against (the merge base of the requested base and the head). */
   readonly baseSha: string;
   readonly headSha: string;
+  /** The base as requested, when it differs from `baseSha` because the target branch moved on. */
+  readonly requestedBaseSha?: string;
+  /** The pull request's commits, oldest first. SHAs only: commit messages are untrusted text and never reach the reviewer. */
+  readonly commitShas?: readonly string[];
 }
 
 const entrySchema = z.object({
@@ -35,7 +40,7 @@ const planSchema = z.object({
   excluded: z.array(z.object({ path: z.string(), kind: z.string(), reason: z.string() })),
   withheld: z.array(z.string()), disposition: z.enum(["review", "skip_clean", "manual_review"]),
   manualReasons: z.array(z.string()), unreviewed: z.array(z.string()),
-  meta: z.object({ baseSha: z.string(), headSha: z.string() }),
+  meta: z.object({ baseSha: z.string(), headSha: z.string(), requestedBaseSha: z.string().optional(), commitShas: z.array(z.string()).optional() }),
 });
 
 /** A patch file name for a repo path: separators and anything unusual become "__" / "_", so it stays inside patches/. */
@@ -89,7 +94,7 @@ export async function loadReviewContext(ctxDir: string, repoRoot: string, prompt
   const { meta, ...plan } = parsed.data;
   return {
     plan: plan as ReviewPlan,
-    meta,
+    meta: meta as ContextMeta,
     paths: { repoRoot, sharedContextPath: join(ctxDir, "shared-context.txt"), patchDir: join(ctxDir, "patches"), promptDir },
   };
 }

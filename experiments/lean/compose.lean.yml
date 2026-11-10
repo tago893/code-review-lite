@@ -21,6 +21,10 @@ services:
       - LEAN_REQUEST_BUDGET_BYTES
       - LEAN_HISTORY_BYTES
       - LEAN_MAX_FORBIDDEN_CALLS
+      # Which reviewer code ran (the container has no .git). Set by `source experiments/lean/reviewer-env.sh`; recorded in
+      # the result's provenance, and null when absent.
+      - CRA_REVIEWER_COMMIT
+      - CRA_REVIEWER_DIRTY
     volumes:
       - ../dist-lean:/opt/crl/lean:ro
   stub:

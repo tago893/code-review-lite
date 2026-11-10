@@ -10,6 +10,7 @@ import { gateForModel } from "../../src/workspace/gate.js";
 import { loadReviewContext } from "../../src/workspace/review-context.js";
 import { createChat, ProviderError, type ChatFn, type ToolUseFailure } from "./client.js";
 import { investigate, type TraceEvent } from "./loop.js";
+import { buildProvenance, reviewerFromEnv, UNKNOWN_REVIEWER, type Provenance, type ReviewerIdentity } from "./provenance.js";
 
 // Lean reviewer: one model, one bounded tool loop (investigate), then one separate structured call with no tools.
 // reviewLean is the whole review; main() below is only the command line around it.
@@ -25,6 +26,8 @@ export interface LeanOptions {
   readonly maxRequestBytes: number;
   readonly historyBytes: number;
   readonly maxForbiddenToolCalls: number;
+  /** Which reviewer code is running, as told by whoever launched it. Unknown (null) when not supplied. */
+  readonly reviewer?: ReviewerIdentity;
   readonly signal?: AbortSignal;
   readonly onEvent: (event: TraceEvent) => void;
 }
@@ -38,6 +41,8 @@ export interface LeanResult {
   readonly dropped: readonly string[];
   readonly baseSha: string;
   readonly headSha: string;
+  /** How this result was produced: reviewer commit, model, prompt and configuration hashes, reviewed range. */
+  readonly provenance: Provenance;
   readonly turns: number;
   readonly tokensIn: number;
   readonly tokensOut: number;
@@ -53,15 +58,26 @@ const TOOL_NOTE = "Your tools are named cra_read, cra_grep, cra_glob and cra_lis
 
 export async function reviewLean(o: LeanOptions): Promise<LeanResult> {
   const context = await loadReviewContext(o.ctx, o.repo, o.prompts);
-  const base = { baseSha: context.meta.baseSha, headSha: context.meta.headSha };
-  const stop = (reason: string, extra: Partial<LeanResult> = {}): LeanResult =>
-    Object.freeze({ status: "incomplete", reason, findings: [], dropped: [], turns: 0, tokensIn: 0, tokensOut: 0, recoveryAttempted: false, ...base, ...extra });
-
   const [shared, category, sharedContext] = await Promise.all([
     readFile(join(o.prompts, "REVIEWER_SHARED.md"), "utf8"),
     readFile(join(o.prompts, `${o.category}.md`), "utf8"),
     readFile(context.paths.sharedContextPath, "utf8"),
   ]);
+  const provenance = buildProvenance({
+    reviewer: o.reviewer ?? UNKNOWN_REVIEWER, meta: context.meta, model: o.model, category: o.category,
+    promptText: [shared, category, TOOL_NOTE],
+    settings: { maxTurns: o.maxTurns, maxRequestBytes: o.maxRequestBytes, historyBytes: o.historyBytes, maxForbiddenToolCalls: o.maxForbiddenToolCalls },
+  });
+  const base = { baseSha: context.meta.baseSha, headSha: context.meta.headSha, provenance };
+  const stop = (reason: string, extra: Partial<LeanResult> = {}): LeanResult =>
+    Object.freeze({ status: "incomplete", reason, findings: [], dropped: [], turns: 0, tokensIn: 0, tokensOut: 0, recoveryAttempted: false, ...base, ...extra });
+
+  // The plan was decided on the trusted side from the net diff. Nothing to review (for example a bug that a later commit
+  // reverted exactly) needs no model call; changes nobody can analyse must not become a clean result. Same rules as the
+  // original pipeline (src/pipeline.ts).
+  if (context.plan.disposition === "manual_review") return stop("manual_review_required");
+  if (context.plan.disposition === "skip_clean") return Object.freeze({ status: "complete", findings: [], dropped: [], turns: 0, tokensIn: 0, tokensOut: 0, recoveryAttempted: false, ...base });
+
   const split = PHASE2_HEADING.exec(shared)?.index ?? shared.length;
   const gatedContext = gateForModel("phase1_context", sharedContext);
   if (gatedContext.status !== "ok") return stop(`sanitization_failed_${gatedContext.reason}`);
@@ -141,6 +157,7 @@ async function main(argv: readonly string[], env: NodeJS.ProcessEnv): Promise<nu
   const result = await reviewLean({
     repo, ctx, prompts, category, chat, signal, onEvent,
     model: env["REVIEWER_MODEL"] || "openai/gpt-oss-120b",
+    reviewer: reviewerFromEnv(env),
     maxTurns: int(env["REVIEW_INVESTIGATION_STEPS"], 12),
     maxRequestBytes: int(env["LEAN_REQUEST_BUDGET_BYTES"], 32_000),
     historyBytes: int(env["LEAN_HISTORY_BYTES"], 8_000),
