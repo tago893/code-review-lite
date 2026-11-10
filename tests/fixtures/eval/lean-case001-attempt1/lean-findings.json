@@ -1,0 +1,11 @@
+{
+  "status": "incomplete",
+  "reason": "provider_400_tool_use_failed",
+  "findings": [],
+  "dropped": [],
+  "turns": 5,
+  "tokensIn": 15339,
+  "tokensOut": 555,
+  "baseSha": "b70fc05a693a01012b4c5eaab669c385e8baf0d7",
+  "headSha": "63f9aa53c1ad2944e6cb0e1cf19d901748ace30b"
+}

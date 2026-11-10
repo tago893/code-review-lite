@@ -1,0 +1,31 @@
+{
+  "findings": {
+    "total": 0,
+    "byReviewer": {},
+    "bySeverity": {},
+    "byStatus": {}
+  },
+  "tokens": {
+    "input": 54345,
+    "output": 200,
+    "byAgent": {
+      "code_quality": {
+        "input": 54345,
+        "output": 200
+      }
+    }
+  },
+  "usage": {
+    "unreportedRuns": 0,
+    "lowerBound": true
+  },
+  "costUsd": 0,
+  "drops": {
+    "total": 0,
+    "byReason": {}
+  },
+  "retries": 0,
+  "fallbacks": 0,
+  "completion": "incomplete",
+  "durationMs": 329515
+}

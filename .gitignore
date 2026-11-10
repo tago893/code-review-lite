@@ -31,3 +31,4 @@ Thumbs.db
 .idea/
 .vscode/
 dist-lean/
+dist-eval/

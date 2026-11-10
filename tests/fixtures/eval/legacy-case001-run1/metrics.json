@@ -1,0 +1,31 @@
+{
+  "findings": {
+    "total": 0,
+    "byReviewer": {},
+    "bySeverity": {},
+    "byStatus": {}
+  },
+  "tokens": {
+    "input": 61479,
+    "output": 747,
+    "byAgent": {
+      "code_quality": {
+        "input": 61479,
+        "output": 747
+      }
+    }
+  },
+  "usage": {
+    "unreportedRuns": 0,
+    "lowerBound": false
+  },
+  "costUsd": 0,
+  "drops": {
+    "total": 0,
+    "byReason": {}
+  },
+  "retries": 0,
+  "fallbacks": 0,
+  "completion": "incomplete",
+  "durationMs": 307899
+}

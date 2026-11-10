@@ -1,0 +1,35 @@
+{"ts":"2026-11-08T22:12:14.726Z","event":"review_start","tier":"lite","agents":["code_quality"]}
+{"ts":"2026-11-08T22:12:14.727Z","event":"reviewer_start","reviewer":"code_quality","models":["openai/gpt-oss-120b"]}
+{"ts":"2026-11-08T22:12:14.727Z","event":"attempt_start","reviewer":"code_quality","attemptId":"code_quality#1","model":"openai/gpt-oss-120b","tryNo":0}
+{"ts":"2026-11-08T22:12:16.554Z","event":"attempt_session","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","model":"openai/gpt-oss-120b"}
+{"ts":"2026-11-08T22:12:18.615Z","event":"tool_call","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","tool":"cra_read","status":"completed","input":{"limit":400,"offset":1,"path":"app/services/hold_service.py"},"outputBytes":5304,"durationMs":7}
+{"ts":"2026-11-08T22:12:19.624Z","event":"tool_call","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","tool":"cra_grep","status":"completed","input":{"path":"app","pattern":"def get_hold"},"inputKeys":["literal"],"outputBytes":229,"durationMs":12}
+{"ts":"2026-11-08T22:12:19.625Z","event":"session_retry","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","retryAttempt":1,"reason":"rate_limit","delayMs":11281}
+{"ts":"2026-11-08T22:12:31.664Z","event":"tool_call","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","tool":"cra_read","status":"completed","input":{"limit":200,"path":"app/api/routes_holds.py"},"outputBytes":1043,"durationMs":5}
+{"ts":"2026-11-08T22:12:44.667Z","event":"heartbeat","elapsedMs":29942}
+{"ts":"2026-11-08T22:12:59.783Z","event":"session_retry","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","retryAttempt":2,"reason":"rate_limit","delayMs":767}
+{"ts":"2026-11-08T22:13:01.805Z","event":"tool_call","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","tool":"cra_grep","status":"completed","input":{"path":"app","pattern":"confirm"},"outputBytes":510,"durationMs":9}
+{"ts":"2026-11-08T22:13:01.806Z","event":"session_retry","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","retryAttempt":1,"reason":"rate_limit","delayMs":2293}
+{"ts":"2026-11-08T22:13:04.822Z","event":"tool_call","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","tool":"cra_read","status":"completed","input":{"path":"app/api/routes_bookings.py"},"outputBytes":1498,"durationMs":3}
+{"ts":"2026-11-08T22:13:14.609Z","event":"heartbeat","elapsedMs":59884}
+{"ts":"2026-11-08T22:13:40.998Z","event":"tool_call","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","tool":"cra_read","status":"completed","input":{"path":"app/services/booking_service.py"},"outputBytes":2511,"durationMs":3}
+{"ts":"2026-11-08T22:13:44.559Z","event":"heartbeat","elapsedMs":89834}
+{"ts":"2026-11-08T22:14:14.507Z","event":"heartbeat","elapsedMs":119782}
+{"ts":"2026-11-08T22:14:21.120Z","event":"tool_call","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","tool":"cra_read","status":"completed","input":{"path":"app/infra/kv_store.py"},"outputBytes":2939,"durationMs":6}
+{"ts":"2026-11-08T22:14:44.447Z","event":"heartbeat","elapsedMs":149722}
+{"ts":"2026-11-08T22:15:07.358Z","event":"session_retry","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","retryAttempt":2,"reason":"rate_limit","delayMs":1762}
+{"ts":"2026-11-08T22:15:10.377Z","event":"tool_call","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","tool":"cra_read","status":"completed","input":{"path":"app/repositories/base.py"},"outputBytes":1650,"durationMs":3}
+{"ts":"2026-11-08T22:15:10.377Z","event":"session_retry","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","retryAttempt":1,"reason":"rate_limit","delayMs":50539}
+{"ts":"2026-11-08T22:15:14.397Z","event":"heartbeat","elapsedMs":179672}
+{"ts":"2026-11-08T22:15:44.415Z","event":"heartbeat","elapsedMs":209690}
+{"ts":"2026-11-08T22:16:01.655Z","event":"tool_call","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","tool":"cra_grep","status":"completed","input":{"path":"app","pattern":"class InMemoryHoldRepository"},"outputBytes":46,"durationMs":9}
+{"ts":"2026-11-08T22:16:14.362Z","event":"heartbeat","elapsedMs":239637}
+{"ts":"2026-11-08T22:16:44.316Z","event":"heartbeat","elapsedMs":269591}
+{"ts":"2026-11-08T22:16:51.882Z","event":"tool_call","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","tool":"cra_grep","status":"completed","input":{"path":"app","pattern":"HoldRepository"},"outputBytes":635,"durationMs":9}
+{"ts":"2026-11-08T22:17:14.267Z","event":"heartbeat","elapsedMs":299542}
+{"ts":"2026-11-08T22:17:44.225Z","event":"heartbeat","elapsedMs":329500}
+{"ts":"2026-11-08T22:17:44.227Z","event":"tool_call","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","tool":"cra_read","status":"completed","input":{"path":"app/repositories/sql.py"},"outputBytes":3494,"durationMs":3}
+{"ts":"2026-11-08T22:17:44.238Z","event":"session_cleanup","attemptId":"code_quality#1","sessionId":"ses_e42c7d7e1ffebhEqLRnX8lalFn","abort":"ok","idle":true,"delete":"ok","waitedMs":11}
+{"ts":"2026-11-08T22:17:44.239Z","event":"attempt_failed","reviewer":"code_quality","attemptId":"code_quality#1","model":"openai/gpt-oss-120b","tryNo":0,"kind":"context_overflow","decision":"stop_not_retryable","usage":{"input":54345,"output":200,"complete":false}}
+{"ts":"2026-11-08T22:17:44.239Z","event":"reviewer_failed","reviewer":"code_quality","error":"model_context_overflow","failureClass":"model","kind":"context_overflow","sdkName":"ContextOverflowError","durationMs":329512}
+{"ts":"2026-11-08T22:17:44.240Z","event":"review_done","completion":"incomplete","verdict":"not_determined","findings":0}

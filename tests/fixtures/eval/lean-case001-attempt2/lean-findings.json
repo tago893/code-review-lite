@@ -1,0 +1,12 @@
+{
+  "status": "incomplete",
+  "reason": "provider_429_rate_limit_exceeded",
+  "findings": [],
+  "dropped": [],
+  "turns": 9,
+  "tokensIn": 31711,
+  "tokensOut": 849,
+  "recoveryAttempted": false,
+  "baseSha": "b70fc05a693a01012b4c5eaab669c385e8baf0d7",
+  "headSha": "63f9aa53c1ad2944e6cb0e1cf19d901748ace30b"
+}
