@@ -134,6 +134,8 @@ const RATE_HEADERS = {
   "x-ratelimit-remaining-requests": "remainingRequests", "x-ratelimit-remaining-tokens": "remainingTokens",
   "x-ratelimit-reset-requests": "resetRequests", "x-ratelimit-reset-tokens": "resetTokens",
 };
+/** Rate-limit headers forwarded to the reviewer (validated), so it can wait before a request instead of collecting 429s. */
+const PASS_RATE_HEADERS = ["x-ratelimit-limit-tokens", "x-ratelimit-remaining-tokens", "x-ratelimit-reset-tokens", "x-ratelimit-remaining-requests", "x-ratelimit-reset-requests"];
 function safeValue(value) {
   return typeof value === "string" && value.length <= 24 && DURATION_OR_COUNT.test(value.trim()) ? value.trim() : undefined;
 }
@@ -267,8 +269,14 @@ http
           if (status >= 400) log({ event: "provider_error", rid, status, ...providerErrorFacts(Buffer.concat(kept)) });
           log({ event: "response_end", rid, status, bytes, totalMs: Date.now() - t0 });
         });
+        // The reviewer paces itself on the token limit, so the rate-limit headers go back to it, but only values that look
+        // like plain numbers or durations (safeValue); every other upstream header is dropped.
         const passHeaders = {};
-        for (const name of ["content-type", "retry-after", "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"]) if (ur.headers[name]) passHeaders[name] = ur.headers[name];
+        for (const name of ["content-type", "retry-after"]) if (ur.headers[name]) passHeaders[name] = ur.headers[name];
+        for (const name of PASS_RATE_HEADERS) {
+          const value = safeValue(ur.headers[name]);
+          if (value !== undefined) passHeaders[name] = value;
+        }
         res.writeHead(ur.statusCode ?? 502, passHeaders);
         ur.pipe(res);
       });

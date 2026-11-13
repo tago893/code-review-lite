@@ -51,6 +51,8 @@ export interface LoopResult {
   readonly turns: number;
   readonly tokensIn: number;
   readonly tokensOut: number;
+  /** Prompt tokens the provider served from its prompt cache (part of tokensIn; they do not count toward Groq's TPM). */
+  readonly tokensCached: number;
   /** True when the one tool_use_failed recovery was started (its request can still be stopped by the size budget or deadline). */
   readonly recoveryAttempted: boolean;
   /** Why the provider rejected a tool call (fixed words), when it did. */
@@ -67,12 +69,13 @@ export async function investigate(input: LoopInput): Promise<LoopResult> {
   const turns: Turn[] = [];
   let tokensIn = 0;
   let tokensOut = 0;
+  let tokensCached = 0;
   let rejectedCalls = 0;
   let recovered = false;
   let diagnostic: ToolUseFailure | undefined;
   const feedbackAfter = new Set<number>(); // a corrective message follows this many completed turns (0 = before the first)
   const done = (status: "complete" | "incomplete", reason: string | undefined, notes: string): LoopResult =>
-    Object.freeze({ status, ...(reason ? { reason } : {}), notes, turns: turns.length, tokensIn, tokensOut, recoveryAttempted: recovered, ...(diagnostic ? { diagnostic } : {}) });
+    Object.freeze({ status, ...(reason ? { reason } : {}), notes, turns: turns.length, tokensIn, tokensOut, tokensCached, recoveryAttempted: recovered, ...(diagnostic ? { diagnostic } : {}) });
 
   for (let n = 1; n <= input.maxTurns; n++) {
     if (input.signal?.aborted) return done("incomplete", "deadline", "");
@@ -87,8 +90,9 @@ export async function investigate(input: LoopInput): Promise<LoopResult> {
       const parsed = readReply(reply.json);
       tokensIn += parsed.tokensIn;
       tokensOut += parsed.tokensOut;
+      tokensCached += parsed.tokensCached;
       message = parsed.message;
-      input.onEvent({ event: "response", turn: n, toolCalls: message.tool_calls.length, finish: parsed.finish, tokensIn: parsed.tokensIn, tokensOut: parsed.tokensOut });
+      input.onEvent({ event: "response", turn: n, toolCalls: message.tool_calls.length, finish: parsed.finish, tokensIn: parsed.tokensIn, tokensOut: parsed.tokensOut, cachedTokens: parsed.tokensCached, ...(reply.rate ?? {}) });
     } catch (error) {
       const reason = error instanceof ProviderError ? (error.code === "deadline" ? "deadline" : error.message) : error instanceof MalformedToolCall ? error.message : "malformed_response";
       if (error instanceof ProviderError) input.onEvent({ event: "provider_error", turn: n, status: error.status, code: error.code, type: error.errorType, retries: error.retries, ...(error.toolUse ?? {}) });
@@ -132,8 +136,8 @@ interface AssistantMessage {
   readonly tool_calls: readonly { readonly id: string; readonly function: { readonly name: string; readonly arguments: string } }[];
 }
 
-function readReply(json: unknown): { message: AssistantMessage; finish: string; tokensIn: number; tokensOut: number } {
-  const root = json as { choices?: { message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }[]; usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } };
+function readReply(json: unknown): { message: AssistantMessage; finish: string; tokensIn: number; tokensOut: number; tokensCached: number } {
+  const root = json as { choices?: { message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }[]; usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; prompt_tokens_details?: { cached_tokens?: unknown } } };
   const choice = root.choices?.[0];
   if (choice?.message === undefined) throw new Error("malformed_response");
   const raw = Array.isArray(choice.message.tool_calls) ? (choice.message.tool_calls as unknown[]) : [];
@@ -150,6 +154,7 @@ function readReply(json: unknown): { message: AssistantMessage; finish: string; 
     finish: typeof choice.finish_reason === "string" ? choice.finish_reason.slice(0, 20) : "none",
     tokensIn: count(root.usage?.prompt_tokens),
     tokensOut: count(root.usage?.completion_tokens),
+    tokensCached: count(root.usage?.prompt_tokens_details?.cached_tokens),
   };
 }
 

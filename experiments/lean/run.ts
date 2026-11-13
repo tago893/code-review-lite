@@ -8,7 +8,7 @@ import type { Category, Finding } from "../../src/types.js";
 import { verifyCitation } from "../../src/verify/citation.js";
 import { gateForModel } from "../../src/workspace/gate.js";
 import { loadReviewContext } from "../../src/workspace/review-context.js";
-import { createChat, ProviderError, type ChatFn, type ToolUseFailure } from "./client.js";
+import { createChat, ProviderError, type ChatFn, type ToolUseFailure, type TranscriptEntry } from "./client.js";
 import { investigate, type TraceEvent } from "./loop.js";
 import { buildProvenance, reviewerFromEnv, UNKNOWN_REVIEWER, type Provenance, type ReviewerIdentity } from "./provenance.js";
 
@@ -46,6 +46,8 @@ export interface LeanResult {
   readonly turns: number;
   readonly tokensIn: number;
   readonly tokensOut: number;
+  /** Investigation prompt tokens served from the provider's prompt cache (they do not count toward Groq's TPM). */
+  readonly tokensCached: number;
   /** True when the one tool_use_failed recovery was started (its request can still be stopped by the size budget or deadline). */
   readonly recoveryAttempted: boolean;
   /** Why the provider rejected a tool call (fixed words), when it did. */
@@ -71,14 +73,14 @@ export async function reviewLean(o: LeanOptions): Promise<LeanResult> {
   });
   const base = { baseSha: context.meta.baseSha, headSha: context.meta.headSha, provenance, unreviewed: context.plan.unreviewed };
   const stop = (reason: string, extra: Partial<LeanResult> = {}): LeanResult =>
-    Object.freeze({ status: "incomplete", reason, findings: [], dropped: [], turns: 0, tokensIn: 0, tokensOut: 0, recoveryAttempted: false, ...base, ...extra });
+    Object.freeze({ status: "incomplete", reason, findings: [], dropped: [], turns: 0, tokensIn: 0, tokensOut: 0, tokensCached: 0, recoveryAttempted: false, ...base, ...extra });
 
   // The plan was decided on the trusted side from the net diff. Nothing to review (for example a bug that a later commit
   // reverted exactly) needs no model call; changes nobody can analyse must not become a clean result. Same rules as the
   // original pipeline (src/pipeline.ts).
   if (context.plan.disposition === "manual_review") return stop("manual_review_required");
   // The reason marks the result, so a skip is never mistaken for a review in which a model looked and found nothing.
-  if (context.plan.disposition === "skip_clean") return Object.freeze({ status: "complete", reason: "nothing_to_review", findings: [], dropped: [], turns: 0, tokensIn: 0, tokensOut: 0, recoveryAttempted: false, ...base });
+  if (context.plan.disposition === "skip_clean") return Object.freeze({ status: "complete", reason: "nothing_to_review", findings: [], dropped: [], turns: 0, tokensIn: 0, tokensOut: 0, tokensCached: 0, recoveryAttempted: false, ...base });
 
   const split = PHASE2_HEADING.exec(shared)?.index ?? shared.length;
   const gatedContext = gateForModel("phase1_context", sharedContext);
@@ -88,7 +90,7 @@ export async function reviewLean(o: LeanOptions): Promise<LeanResult> {
   const system = `${shared.slice(0, split)}\n${category}`;
   const user = [`Per-file patches are in ${context.paths.patchDir}. The change under review:`, "<shared_context>", gatedContext.text, "</shared_context>", "Investigate now. When done, reply with your Phase 1 notes (plain text, no tool call)."].join("\n\n");
   const phase1 = await investigate({ chat: o.chat, model: o.model, system, user, roots, maxTurns: o.maxTurns, maxRequestBytes: o.maxRequestBytes, historyBytes: o.historyBytes, maxForbiddenToolCalls: o.maxForbiddenToolCalls, onEvent: o.onEvent, ...(o.signal ? { signal: o.signal } : {}) });
-  const usage = { turns: phase1.turns, tokensIn: phase1.tokensIn, tokensOut: phase1.tokensOut, recoveryAttempted: phase1.recoveryAttempted, ...(phase1.diagnostic ? { diagnostic: phase1.diagnostic } : {}) };
+  const usage = { turns: phase1.turns, tokensIn: phase1.tokensIn, tokensOut: phase1.tokensOut, tokensCached: phase1.tokensCached, recoveryAttempted: phase1.recoveryAttempted, ...(phase1.diagnostic ? { diagnostic: phase1.diagnostic } : {}) };
   if (phase1.status === "incomplete") return stop(phase1.reason ?? "incomplete", usage);
 
   const notes = gateForModel("phase2_notes", phase1.notes);
@@ -130,6 +132,22 @@ function extractContent(json: unknown): string {
   return content;
 }
 
+// ---- debug transcript -----------------------------------------------------------------------------------------------
+
+/** The opt-in transcript file. Its name says what it is: it holds source code and raw model output. */
+export const TRANSCRIPT_FILE = "lean-transcript.private.jsonl";
+
+/**
+ * A writer for the private debug transcript, or undefined (the default) unless CRA_DEBUG_TRANSCRIPT is exactly "1".
+ * The file sits next to the trace in the output directory on the user's machine; it is never part of the result.
+ */
+export function transcriptSink(out: string, env: Readonly<Record<string, string | undefined>>): ((entry: TranscriptEntry) => void) | undefined {
+  if (env["CRA_DEBUG_TRANSCRIPT"] !== "1") return undefined;
+  const path = join(out, TRANSCRIPT_FILE);
+  writeFileSync(path, "");
+  return (entry) => appendFileSync(path, `${JSON.stringify({ t: Date.now(), ...entry })}\n`);
+}
+
 // ---- command line -------------------------------------------------------------------------------------------------
 
 const int = (value: string | undefined, fallback: number): number => {
@@ -156,7 +174,8 @@ async function main(argv: readonly string[], env: NodeJS.ProcessEnv): Promise<nu
   const onEvent = (event: TraceEvent): void => { appendFileSync(tracePath, `${JSON.stringify({ t: Date.now() - started, ...event })}\n`); };
 
   const signal = AbortSignal.timeout(int(env["REVIEW_DEADLINE_MINUTES"], 10) * 60_000);
-  const chat = createChat({ baseUrl, signal, onRetry: (r) => onEvent({ event: "retry_wait", retryNo: r.retryNo, waitMs: r.waitMs }) });
+  const onTranscript = transcriptSink(out, env);
+  const chat = createChat({ baseUrl, signal, onRetry: (r) => onEvent({ event: "retry_wait", retryNo: r.retryNo, waitMs: r.waitMs }), ...(onTranscript ? { onTranscript } : {}) });
   const result = await reviewLean({
     repo, ctx, prompts, category, chat, signal, onEvent,
     model: env["REVIEWER_MODEL"] || "openai/gpt-oss-120b",

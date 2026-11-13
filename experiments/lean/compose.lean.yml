@@ -22,6 +22,8 @@ services:
       - LEAN_REQUEST_BUDGET_BYTES
       - LEAN_HISTORY_BYTES
       - LEAN_MAX_FORBIDDEN_CALLS
+      # Debug only: CRA_DEBUG_TRANSCRIPT=1 writes lean-transcript.private.jsonl (source code and raw model output).
+      - CRA_DEBUG_TRANSCRIPT
       # Which reviewer code ran (the container has no .git). Set by `source experiments/lean/reviewer-env.sh`; recorded in
       # the result's provenance, and null when absent.
       - CRA_REVIEWER_COMMIT

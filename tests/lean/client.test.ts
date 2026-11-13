@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createChat, ProviderError } from "../../experiments/lean/client.js";
+import { createChat, parseDuration, ProviderError, type TranscriptEntry } from "../../experiments/lean/client.js";
 import type { FetchLike } from "../../src/agents/structured.js";
 
 type Reply = { status: number; body: string; headers?: Record<string, string> };
@@ -62,6 +62,38 @@ describe("lean client", () => {
     const pending = createChat({ baseUrl: "http://p", fetchFn: f.fetchFn, signal: controller.signal })({});
     setTimeout(() => controller.abort(), 20);
     expect(await pending.catch((e: unknown) => e)).toMatchObject({ status: 0, code: "deadline" });
+  });
+
+  it("reports the token rate-limit headers of a reply as numbers", async () => {
+    const headers = { "x-ratelimit-remaining-tokens": "5120", "x-ratelimit-limit-tokens": "8000", "x-ratelimit-reset-tokens": "1m2.5s" };
+    const result = await createChat({ baseUrl: "http://p", fetchFn: fake({ status: 200, body: "{}", headers }).fetchFn })({});
+    expect(result.rate).toEqual({ remainingTokens: 5120, limitTokens: 8000, resetTokensMs: 62_500 });
+    expect((await createChat({ baseUrl: "http://p", fetchFn: fake(ok).fetchFn })({})).rate).toEqual({});
+  });
+
+  it("parses Groq's duration format and rejects anything else", () => {
+    expect(parseDuration("7.66s")).toBe(7_660);
+    expect(parseDuration("2m59.56s")).toBe(179_560);
+    expect(parseDuration("120ms")).toBe(120);
+    expect(parseDuration("1h2m")).toBe(3_720_000);
+    for (const bad of ["", "soon", "5", "-3s", "1s; drop"]) expect(parseDuration(bad)).toBeUndefined();
+  });
+
+  it("hands every attempt to the transcript hook, including the raw body of a failure", async () => {
+    const generation = JSON.stringify({ error: { message: "m", type: "invalid_request_error", code: "tool_use_failed", failed_generation: "RAW_MODEL_OUTPUT" } });
+    const f = fake(err(429, "rate_limit_exceeded"), { status: 400, body: generation });
+    const entries: TranscriptEntry[] = [];
+    await createChat({ baseUrl: "http://p", fetchFn: f.fetchFn, sleep: async () => undefined, onTranscript: (e) => entries.push(e) })({ q: 1 }).catch(() => undefined);
+    expect(entries.map((e) => [e.attempt, e.status])).toEqual([[0, 429], [1, 400]]);
+    expect(entries[0]?.request).toEqual({ q: 1 });
+    expect(entries[1]?.response).toContain("RAW_MODEL_OUTPUT");
+  });
+
+  it("caps a transcript response so one huge body cannot fill the disk", async () => {
+    const entries: TranscriptEntry[] = [];
+    await createChat({ baseUrl: "http://p", fetchFn: fake({ status: 200, body: JSON.stringify({ x: "y".repeat(300_000) }) }).fetchFn, onTranscript: (e) => entries.push(e) })({});
+    expect(entries[0]?.response.length).toBeLessThanOrEqual(100_100);
+    expect(entries[0]?.response).toContain("[truncated");
   });
 
   it("sends only a placeholder credential", async () => {

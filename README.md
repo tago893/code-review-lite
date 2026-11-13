@@ -78,6 +78,11 @@ cat ./demo-out/lean-findings.json                         # status, verified fin
 cat ./demo-out/lean-trace.jsonl                           # one line per request, tool call, retry and error (no source text)
 ```
 
+**Debugging a failed run:** `export CRA_DEBUG_TRANSCRIPT=1` also writes `lean-transcript.private.jsonl`, with every request
+and the provider's raw answer, including Groq's `failed_generation`. It contains your source code and raw model output: keep
+it private and delete it when done. The normal trace records, per request, the prompt tokens served from Groq's cache
+(`cachedTokens`) and the token rate-limit headers (`remainingTokens`, `resetTokensMs`).
+
 Exit codes: `0` complete, `2` incomplete or failed, `64` bad usage. The reviewer uses the bug-finding `code_quality` prompt by default.
 For the SQL-injection demo above, also `export LEAN_CATEGORY=security`.
 

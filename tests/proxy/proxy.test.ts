@@ -54,13 +54,13 @@ async function waitFor(check: () => boolean, ms = 4000): Promise<void> {
   }
 }
 
-function post(port: number, path: string, body: unknown): Promise<{ status: number; text: string }> {
+function post(port: number, path: string, body: unknown): Promise<{ status: number; text: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
     const req = http.request({ host: "127.0.0.1", port, path, method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(data), authorization: "Bearer placeholder" } }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (c: Buffer) => chunks.push(c));
-      res.on("end", () => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString() }));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString(), headers: res.headers }));
     });
     req.on("error", reject);
     req.end(data);
@@ -117,6 +117,24 @@ describe("credential proxy: request correlation and rate-limit metadata", () => 
     expect(reply.text).toContain("Request too large"); // the caller still gets the real body
     await waitFor(() => events("provider_error").length === 1);
     expect(events("provider_error")[0]).toMatchObject({ status: 413, window: "TPM", limit: 8000, requested: 11111 });
+  });
+
+  it("passes the token rate-limit headers through to the reviewer so it can pace itself, and drops anything else", async () => {
+    const port = await startProxy((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json", "x-ratelimit-remaining-tokens": "5120", "x-ratelimit-limit-tokens": "8000", "x-ratelimit-reset-tokens": "21.6s", "x-ratelimit-remaining-requests": "998", "x-request-id": "req_SECRET", "set-cookie": "a=b" });
+      res.end("{}");
+    });
+    const reply = await post(port, "/openai/v1/chat/completions", chat);
+    expect(reply.headers).toMatchObject({ "x-ratelimit-remaining-tokens": "5120", "x-ratelimit-limit-tokens": "8000", "x-ratelimit-reset-tokens": "21.6s", "x-ratelimit-remaining-requests": "998" });
+    expect(reply.headers["x-request-id"]).toBeUndefined();
+    expect(reply.headers["set-cookie"]).toBeUndefined();
+  });
+
+  it("does not pass through rate-limit header values that are not plain numbers or durations", async () => {
+    const port = await startProxy((_req, res) => { res.writeHead(200, { "x-ratelimit-remaining-tokens": "<script>", "x-ratelimit-limit-tokens": "8000" }); res.end("{}"); });
+    const reply = await post(port, "/openai/v1/chat/completions", chat);
+    expect(reply.headers["x-ratelimit-remaining-tokens"]).toBeUndefined();
+    expect(reply.headers["x-ratelimit-limit-tokens"]).toBe("8000");
   });
 
   it("discards values that do not look like plain rate-limit data", async () => {
