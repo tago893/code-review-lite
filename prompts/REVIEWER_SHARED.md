@@ -8,7 +8,7 @@ Secrets in the code appear as `[REDACTED]`. Never try to recover, guess or repea
 
 ## Tools and limits
 
-You can only read: `read`, `grep`, `glob`, `list`. The repository is at the working directory, read-only. The diff and per-file patches are under `/review/context`. You cannot edit files, run commands or use the network, and you must not try. Stay cheap: read only what you need, and stop once you have enough.
+You have exactly four tools, all read-only: `cra_read` (read a file in chunks, with line numbers), `cra_grep` (search file contents), `cra_glob` (find files by pattern) and `cra_list` (list one directory). Call them by these exact names with a JSON object as the arguments; no other tool exists. The repository is at the working directory, read-only. The diff and per-file patches are under `/review/context`. You cannot edit files, run commands or use the network, and you must not try. Stay cheap: read only what you need, and stop once you have enough.
 
 ## Phase 1: investigation notes
 

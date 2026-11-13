@@ -56,7 +56,6 @@ export interface LeanResult {
 
 const PHASE2_HEADING = /^## Phase 2\b.*$/m;
 const NO_FINDINGS = "No findings.";
-const TOOL_NOTE = "Your tools are named cra_read, cra_grep, cra_glob and cra_list (the read, grep, glob and list described above). Call them with JSON arguments.";
 
 export async function reviewLean(o: LeanOptions): Promise<LeanResult> {
   const context = await loadReviewContext(o.ctx, o.repo, o.prompts);
@@ -67,7 +66,7 @@ export async function reviewLean(o: LeanOptions): Promise<LeanResult> {
   ]);
   const provenance = buildProvenance({
     reviewer: o.reviewer ?? UNKNOWN_REVIEWER, meta: context.meta, model: o.model, category: o.category,
-    promptText: [shared, category, TOOL_NOTE],
+    promptText: [shared, category],
     settings: { maxTurns: o.maxTurns, maxRequestBytes: o.maxRequestBytes, historyBytes: o.historyBytes, maxForbiddenToolCalls: o.maxForbiddenToolCalls },
   });
   const base = { baseSha: context.meta.baseSha, headSha: context.meta.headSha, provenance, unreviewed: context.plan.unreviewed };
@@ -86,7 +85,7 @@ export async function reviewLean(o: LeanOptions): Promise<LeanResult> {
   if (gatedContext.status !== "ok") return stop(`sanitization_failed_${gatedContext.reason}`);
 
   const roots: Roots = { primary: o.repo, extra: [o.ctx] };
-  const system = `${shared.slice(0, split)}\n${category}\n\n${TOOL_NOTE}`;
+  const system = `${shared.slice(0, split)}\n${category}`;
   const user = [`Per-file patches are in ${context.paths.patchDir}. The change under review:`, "<shared_context>", gatedContext.text, "</shared_context>", "Investigate now. When done, reply with your Phase 1 notes (plain text, no tool call)."].join("\n\n");
   const phase1 = await investigate({ chat: o.chat, model: o.model, system, user, roots, maxTurns: o.maxTurns, maxRequestBytes: o.maxRequestBytes, historyBytes: o.historyBytes, maxForbiddenToolCalls: o.maxForbiddenToolCalls, onEvent: o.onEvent, ...(o.signal ? { signal: o.signal } : {}) });
   const usage = { turns: phase1.turns, tokensIn: phase1.tokensIn, tokensOut: phase1.tokensOut, recoveryAttempted: phase1.recoveryAttempted, ...(phase1.diagnostic ? { diagnostic: phase1.diagnostic } : {}) };
@@ -144,7 +143,8 @@ async function main(argv: readonly string[], env: NodeJS.ProcessEnv): Promise<nu
   for (let i = 0; i < argv.length; i += 2) args.set(argv[i] ?? "", argv[i + 1] ?? "");
   const [repo, ctx, prompts, out] = ["--repo", "--ctx", "--prompts", "--out"].map((k) => args.get(k));
   const baseUrl = env["GROQ_BASE_URL"];
-  const category = (args.get("--category") ?? "security") as Category;
+  // The default assistant looks for bugs and logic flaws (uReview's "Standard" assistant); security is opt-in.
+  const category = (args.get("--category") ?? "code_quality") as Category;
   if (!repo || !ctx || !prompts || !out || !baseUrl || !["code_quality", "security", "performance"].includes(category)) {
     process.stderr.write("usage: run.js --repo <dir> --ctx <dir> --prompts <dir> --out <dir> [--category security|code_quality|performance]; GROQ_BASE_URL must be set\n");
     return 64;

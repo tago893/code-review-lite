@@ -70,7 +70,7 @@ bash tests/integration/make-fixture-repo.sh ./demo-repo   # prints BASE=... and 
 
 export GROQ_API_KEY=...                                   # your shell only; the proxy container receives it by name
 export CRA_ALLOW_LIVE=1 UPSTREAM_URL=https://api.groq.com # explicit consent to make real, billable calls
-export REVIEWER_MODEL=openai/gpt-oss-120b PROXY_MAX_REQUESTS=40 PROXY_MAX_REQUEST_BYTES=32000 REVIEW_DEADLINE_MINUTES=10
+export LEAN_CATEGORY=security REVIEWER_MODEL=openai/gpt-oss-120b PROXY_MAX_REQUESTS=40 PROXY_MAX_REQUEST_BYTES=32000 REVIEW_DEADLINE_MINUTES=10
 export CRL_COMPOSE_EXTRA="$(pwd -W 2>/dev/null || pwd)/experiments/lean/compose.lean.yml"   # runs the lean reviewer in the agent container
 
 bash docker/run.sh --repo ./demo-repo --base <BASE> --head <HEAD> --out-dir ./demo-out
@@ -78,8 +78,8 @@ cat ./demo-out/lean-findings.json                         # status, verified fin
 cat ./demo-out/lean-trace.jsonl                           # one line per request, tool call, retry and error (no source text)
 ```
 
-Exit codes: `0` complete, `2` incomplete or failed, `64` bad usage. The reviewer uses the `security` prompt by default; the compose file
-sets it.
+Exit codes: `0` complete, `2` incomplete or failed, `64` bad usage. The reviewer uses the bug-finding `code_quality` prompt by default.
+For the SQL-injection demo above, also `export LEAN_CATEGORY=security`.
 
 **No key? Run it offline.** The same containers run against a scripted stub instead of a model (this checks the plumbing, not review quality):
 

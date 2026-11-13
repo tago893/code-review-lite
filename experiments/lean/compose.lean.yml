@@ -16,7 +16,8 @@ services:
       - --out
       - /review/out
       - --category
-      - security
+      # The bug-finding assistant by default; LEAN_CATEGORY=security runs the security assistant (the SQL-injection demo).
+      - ${LEAN_CATEGORY:-code_quality}
     environment:
       - LEAN_REQUEST_BUDGET_BYTES
       - LEAN_HISTORY_BYTES
