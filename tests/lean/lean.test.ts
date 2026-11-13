@@ -85,10 +85,10 @@ describe("lean reviewer: tool boundaries", () => {
     expect(result).toMatchObject({ status: "incomplete", reason: "forbidden_tool_requests" });
   });
 
-  it("treats a garbled tool name or non-JSON arguments as an explicit failure", async () => {
-    expect(await run(scripted(toolTurn([["cra_read<|channel|>commentary", { path: "src/users.ts" }]])).chat)).toMatchObject({ status: "incomplete", reason: "malformed_tool_call_bad_tool_name" });
-    expect(await run(scripted(toolTurn([["cra_read", "{not json"]])).chat)).toMatchObject({ status: "incomplete", reason: "malformed_tool_call_bad_arguments" });
-    expect(await run(scripted(toolTurn([["cra_read", "[1]"]])).chat)).toMatchObject({ status: "incomplete", reason: "malformed_tool_call_bad_arguments" });
+  it("ends the run only when the provider's reply itself is malformed (a tool call with no name)", async () => {
+    const nameless = { choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{ id: "c0", type: "function", function: { arguments: "{}" } }] } }] };
+    expect(await run(scripted(nameless).chat)).toMatchObject({ status: "incomplete", reason: "malformed_tool_call_bad_tool_name" });
+    // Garbled names and non-JSON arguments go back to the model instead: tests/lean/badcalls.test.ts.
   });
 
   it("returns an invalid-arguments result for a well-formed call with the wrong fields", async () => {

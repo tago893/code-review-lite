@@ -1,7 +1,7 @@
 import { planPruning, type HistoryMessageLike, type ToolPartLike } from "../../src/agents/history.js";
 import type { Roots } from "../../src/mcp/paths.js";
 import { ProviderError, type ChatFn, type ToolUseFailure } from "./client.js";
-import { MalformedToolCall, runTool, toolDefinitions } from "./tools.js";
+import { REJECTED_CALL_STATUSES, runTool, toolDefinitions, toolLabel } from "./tools.js";
 
 // The whole investigation: ask the model, run the tools it asks for, repeat. Every limit is checked here, in this loop:
 // the number of turns, the size of each request (older tool results shrink to references until it fits) and the run
@@ -11,6 +11,14 @@ import { MalformedToolCall, runTool, toolDefinitions } from "./tools.js";
 // client's 429 policy all apply to it. Any other HTTP 400 ends the run.
 
 const MAX_CALLS_PER_TURN = 16;
+
+/** The provider's reply itself is malformed (a tool call without a string name or arguments). Ends the run. */
+export class MalformedToolCall extends Error {
+  constructor(readonly code: "bad_tool_name") {
+    super(`malformed_tool_call_${code}`);
+    this.name = "MalformedToolCall";
+  }
+}
 
 /** Trusted, fixed text. Nothing from the provider or the model is ever put into it. */
 export const CORRECTIVE_MESSAGE = "Your previous tool call was rejected as invalid. Call only these tools: cra_read, cra_grep, cra_glob, cra_list. Use the exact tool name and a valid JSON object as the arguments.";
@@ -28,7 +36,7 @@ export interface LoopInput {
   readonly maxRequestBytes: number;
   /** Bytes of tool results kept in full per request; older ones become references. Halved until the request fits. */
   readonly historyBytes: number;
-  /** Requests for tools that do not exist before the run is stopped as incomplete. */
+  /** Rejected calls (a tool that does not exist, or arguments that are not a JSON object) before the run stops as incomplete. */
   readonly maxForbiddenToolCalls: number;
   readonly signal?: AbortSignal;
   readonly onEvent: (event: TraceEvent) => void;
@@ -59,7 +67,7 @@ export async function investigate(input: LoopInput): Promise<LoopResult> {
   const turns: Turn[] = [];
   let tokensIn = 0;
   let tokensOut = 0;
-  let unknownCalls = 0;
+  let rejectedCalls = 0;
   let recovered = false;
   let diagnostic: ToolUseFailure | undefined;
   const feedbackAfter = new Set<number>(); // a corrective message follows this many completed turns (0 = before the first)
@@ -104,14 +112,14 @@ export async function investigate(input: LoopInput): Promise<LoopResult> {
     for (const [index, call] of message.tool_calls.entries()) {
       if (index >= MAX_CALLS_PER_TURN) { results.push({ callId: call.id, tool: "cra_none", output: "error: too_many_calls. Make at most 16 calls per turn." }); continue; }
       try {
+        // A bad call comes back to the model as a fixed error result; only a model that keeps making them is stopped.
         const outcome = await runTool(input.roots, call.function.name, call.function.arguments);
-        input.onEvent({ event: "tool", turn: n, tool: call.function.name, status: outcome.status, bytes: Buffer.byteLength(outcome.output) });
-        if (outcome.status === "unknown_tool" && ++unknownCalls >= input.maxForbiddenToolCalls) return done("incomplete", "forbidden_tool_requests", "");
+        input.onEvent({ event: "tool", turn: n, tool: toolLabel(call.function.name), status: outcome.status, bytes: Buffer.byteLength(outcome.output) });
+        if (REJECTED_CALL_STATUSES.has(outcome.status) && ++rejectedCalls >= input.maxForbiddenToolCalls) return done("incomplete", "forbidden_tool_requests", "");
         results.push({ callId: call.id, tool: call.function.name, output: outcome.output });
-      } catch (error) {
-        const reason = error instanceof MalformedToolCall ? error.message : "tool_failed";
-        input.onEvent({ event: "tool", turn: n, tool: "(malformed)", status: reason, bytes: 0 });
-        return done("incomplete", reason, "");
+      } catch {
+        input.onEvent({ event: "tool", turn: n, tool: toolLabel(call.function.name), status: "tool_failed", bytes: 0 });
+        return done("incomplete", "tool_failed", "");
       }
     }
     turns.push({ calls: message.tool_calls.map((c) => ({ id: c.id, name: c.function.name, arguments: c.function.arguments })), results });
@@ -177,6 +185,8 @@ function assemble(input: LoopInput, turns: readonly Turn[], budget: number, feed
     for (const r of turn.results) messages.push({ role: "tool", tool_call_id: r.callId, content: replaced.get(parts.get(r) as ToolPartLike) ?? r.output });
     if (feedbackAfter.has(index + 1)) messages.push({ role: "user", content: CORRECTIVE_MESSAGE });
   }
-  const body = { model: input.model, messages, tools: toolDefinitions, tool_choice: "auto", temperature: 0 };
+  // disable_tool_validation: Groq returns a call to a tool that does not exist instead of failing the whole request with
+  // HTTP 400 tool_use_failed, so the loop can answer it as a tool result and the model can correct itself.
+  const body = { model: input.model, messages, tools: toolDefinitions, tool_choice: "auto", temperature: 0, disable_tool_validation: true };
   return { body, bytes: Buffer.byteLength(JSON.stringify(body)), toolResults: plan.stats.toolResults, pruned: plan.stats.pruned, keptBytes: plan.stats.keptBytes };
 }
