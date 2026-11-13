@@ -169,8 +169,10 @@ export function scoreRun(input: ScoreInput): ScoreResult {
   const fpCount = findings.filter((f) => f.severity !== "suggestion" && (f.verdict === "false_positive" || (f.class === "candidate" && f.verdict === "incorrect"))).length;
   const fpPending = findings.filter((f) => f.class === "unlabeled" && f.verdict === "pending").length;
 
+  // Skipped on the trusted side without a model call: still a miss on a buggy case, but no evidence on a clean one.
+  const skipped = run.status === "complete" && run.reason === "nothing_to_review";
   let detection: Detection;
-  let note: string | null = null;
+  let note: string | null = label && skipped ? "nothing_to_review" : null;
   if (!label) { detection = "not_scored"; note = "unlabeled"; }
   else if (run.status === "incomplete") { detection = "not_scored"; note = "incomplete"; }
   else if (clean) detection = "not_applicable";
@@ -179,7 +181,7 @@ export function scoreRun(input: ScoreInput): ScoreResult {
   else if (candidates.some((c) => c.verdict === "partial")) detection = "partial";
   else detection = "missed";
 
-  const cleanControl: CleanControl = !label || label.expectedRegression ? "not_applicable" : run.status === "incomplete" ? "not_scored" : fpCount <= allowed ? "clean_pass" : "false_positive";
+  const cleanControl: CleanControl = !label || label.expectedRegression ? "not_applicable" : run.status === "incomplete" || skipped ? "not_scored" : fpCount <= allowed ? "clean_pass" : "false_positive";
 
   const { kept, dropped } = { kept: run.citationKept, dropped: run.citationDropped };
   const total = dropped === null ? null : kept + dropped;

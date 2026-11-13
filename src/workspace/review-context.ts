@@ -22,6 +22,8 @@ export interface ContextMeta {
   readonly requestedBaseSha?: string;
   /** The pull request's commits, oldest first. SHAs only: commit messages are untrusted text and never reach the reviewer. */
   readonly commitShas?: readonly string[];
+  /** The true number of commits; `commitShas` may be capped. */
+  readonly commitCount?: number;
 }
 
 const entrySchema = z.object({
@@ -40,7 +42,7 @@ const planSchema = z.object({
   excluded: z.array(z.object({ path: z.string(), kind: z.string(), reason: z.string() })),
   withheld: z.array(z.string()), disposition: z.enum(["review", "skip_clean", "manual_review"]),
   manualReasons: z.array(z.string()), unreviewed: z.array(z.string()),
-  meta: z.object({ baseSha: z.string(), headSha: z.string(), requestedBaseSha: z.string().optional(), commitShas: z.array(z.string()).optional() }),
+  meta: z.object({ baseSha: z.string(), headSha: z.string(), requestedBaseSha: z.string().optional(), commitShas: z.array(z.string()).optional(), commitCount: z.number().int().nonnegative().optional() }),
 });
 
 /** A patch file name for a repo path: separators and anything unusual become "__" / "_", so it stays inside patches/. */

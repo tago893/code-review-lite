@@ -50,6 +50,8 @@ export interface LeanResult {
   readonly recoveryAttempted: boolean;
   /** Why the provider rejected a tool call (fixed words), when it did. */
   readonly diagnostic?: ToolUseFailure;
+  /** Changed files nobody reviewed (generated, binary, lockfile...), redacted. A complete review says nothing about them. */
+  readonly unreviewed: readonly string[];
 }
 
 const PHASE2_HEADING = /^## Phase 2\b.*$/m;
@@ -68,7 +70,7 @@ export async function reviewLean(o: LeanOptions): Promise<LeanResult> {
     promptText: [shared, category, TOOL_NOTE],
     settings: { maxTurns: o.maxTurns, maxRequestBytes: o.maxRequestBytes, historyBytes: o.historyBytes, maxForbiddenToolCalls: o.maxForbiddenToolCalls },
   });
-  const base = { baseSha: context.meta.baseSha, headSha: context.meta.headSha, provenance };
+  const base = { baseSha: context.meta.baseSha, headSha: context.meta.headSha, provenance, unreviewed: context.plan.unreviewed };
   const stop = (reason: string, extra: Partial<LeanResult> = {}): LeanResult =>
     Object.freeze({ status: "incomplete", reason, findings: [], dropped: [], turns: 0, tokensIn: 0, tokensOut: 0, recoveryAttempted: false, ...base, ...extra });
 
@@ -76,7 +78,8 @@ export async function reviewLean(o: LeanOptions): Promise<LeanResult> {
   // reverted exactly) needs no model call; changes nobody can analyse must not become a clean result. Same rules as the
   // original pipeline (src/pipeline.ts).
   if (context.plan.disposition === "manual_review") return stop("manual_review_required");
-  if (context.plan.disposition === "skip_clean") return Object.freeze({ status: "complete", findings: [], dropped: [], turns: 0, tokensIn: 0, tokensOut: 0, recoveryAttempted: false, ...base });
+  // The reason marks the result, so a skip is never mistaken for a review in which a model looked and found nothing.
+  if (context.plan.disposition === "skip_clean") return Object.freeze({ status: "complete", reason: "nothing_to_review", findings: [], dropped: [], turns: 0, tokensIn: 0, tokensOut: 0, recoveryAttempted: false, ...base });
 
   const split = PHASE2_HEADING.exec(shared)?.index ?? shared.length;
   const gatedContext = gateForModel("phase1_context", sharedContext);

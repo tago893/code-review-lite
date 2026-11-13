@@ -18,7 +18,7 @@ export async function prepare(cmd: Prepare): Promise<{ readonly exitCode: 0 | 2;
     if (!planned.ok) return { exitCode: 2, status: planned.reason };
     const snapshot = await prepareWorkspace({ sourceDir: input.repoRoot, outDir: cmd.outRepo });
     if (snapshot.status === "error") return { exitCode: 2, status: `workspace_${snapshot.code}` };
-    await writeReviewContext(cmd.outCtx, planned.plan, { baseSha: input.baseSha, headSha: input.headSha, requestedBaseSha: input.requestedBaseSha, commitShas: input.commitShas });
+    await writeReviewContext(cmd.outCtx, planned.plan, { baseSha: input.baseSha, headSha: input.headSha, requestedBaseSha: input.requestedBaseSha, commitShas: input.commitShas, commitCount: input.commitCount });
     return { exitCode: 0, status: "ready" };
   } catch (error) {
     return { exitCode: 2, status: error instanceof InputError ? error.code : `workspace_${toWorkspaceError(error).code}` };

@@ -70,6 +70,6 @@ export function buildProvenance(input: ProvenanceInput): Provenance {
     baseSha: input.meta.baseSha,
     headSha: input.meta.headSha,
     requestedBaseSha: input.meta.requestedBaseSha ?? null,
-    commitCount: input.meta.commitShas?.length ?? null,
+    commitCount: input.meta.commitCount ?? input.meta.commitShas?.length ?? null,
   });
 }

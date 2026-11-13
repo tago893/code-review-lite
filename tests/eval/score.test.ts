@@ -11,6 +11,22 @@ const score = (dir: string, caseId: string | null, adjudications: readonly Adjud
 const adj = (runId: string, findingIndex: number, f: Parameters<typeof fingerprint>[0], verdict: Adjudication["verdict"], caseId = "buggy"): Adjudication =>
   ({ caseId, runId, findingIndex, fingerprint: fingerprint(f), verdict, note: "checked by hand against the source" });
 
+describe("a review skipped because there was nothing to review", () => {
+  it("keeps its reason, so it is never read as a review in which a model looked and found nothing", () => {
+    const dir = leanRun("skipped", { status: "complete", reason: "nothing_to_review" });
+    expect(loadRun(dir).reason).toBe("nothing_to_review");
+    // No model looked, so a skipped clean case is not evidence of a low false-positive rate.
+    expect(score(dir, "clean_same_head")).toMatchObject({ completion: { status: "complete", reason: "nothing_to_review" }, cleanControl: "not_scored", detectionNote: "nothing_to_review" });
+    // A skipped buggy case is still a miss: the tool let the bug through.
+    expect(score(dir, "buggy")).toMatchObject({ completion: { reason: "nothing_to_review" }, detection: "missed", detectionNote: "nothing_to_review" });
+  });
+
+  it("still has no reason for an ordinary complete review, and refuses any other reason on a complete one", () => {
+    expect(loadRun(leanRun("ordinary", { status: "complete" })).reason).toBeNull();
+    expect(() => loadRun(leanRun("odd", { status: "complete", reason: "looked_fine" }))).toThrow();
+  });
+});
+
 describe("incomplete reviews are never credited", () => {
   const incomplete = ["legacy-case001-run1", "legacy-case001-run2", "legacy-case001-run3", "lean-case001-attempt1", "lean-case001-attempt2"];
   it.each(incomplete)("%s: no detection credit and no clean pass", (name) => {

@@ -69,6 +69,13 @@ describe("run provenance", () => {
     await writeReviewContext(ctx, plan, { baseSha: "c".repeat(40), headSha: "b".repeat(40), requestedBaseSha: "d".repeat(40), commitShas: ["e".repeat(40), "f".repeat(40)] });
     expect((await run({}, undefined, ctx)).provenance).toMatchObject({ baseSha: "c".repeat(40), requestedBaseSha: "d".repeat(40), commitCount: 2 });
   });
+
+  it("records the true commit count, not the length of a capped commit list", async () => {
+    const { plan } = await loadReviewContext(fx.ctx, fx.repo, PROMPTS);
+    const ctx = mkdtempSync(join(tmpdir(), "ctx-"));
+    await writeReviewContext(ctx, plan, { baseSha: "c".repeat(40), headSha: "b".repeat(40), commitShas: ["e".repeat(40)], commitCount: 1005 });
+    expect((await run({}, undefined, ctx)).provenance).toMatchObject({ commitCount: 1005 });
+  });
 });
 
 describe("plan dispositions", () => {
@@ -79,9 +86,17 @@ describe("plan dispositions", () => {
     return ctx;
   }
 
+  it("lists files nobody reviewed (such as a generated file next to real code) in the result", async () => {
+    const { plan } = await loadReviewContext(fx.ctx, fx.repo, PROMPTS);
+    const ctx = mkdtempSync(join(tmpdir(), "ctx-"));
+    await writeReviewContext(ctx, { ...plan, disposition: "review", unreviewed: ["src/gen.ts (generated)"] }, { baseSha: "a".repeat(40), headSha: "b".repeat(40) });
+    expect((await run({}, scripted(textTurn("No findings.")).chat, ctx)).unreviewed).toEqual(["src/gen.ts (generated)"]);
+    expect((await run()).unreviewed).toEqual([]);
+  });
+
   it("nothing to review is complete with no model call", async () => {
     const model = scripted(textTurn(NOTES));
-    expect(await run({}, model.chat, await withDisposition("skip_clean"))).toMatchObject({ status: "complete", findings: [], turns: 0, tokensIn: 0 });
+    expect(await run({}, model.chat, await withDisposition("skip_clean"))).toMatchObject({ status: "complete", reason: "nothing_to_review", findings: [], turns: 0, tokensIn: 0 });
     expect(model.bodies()).toHaveLength(0);
   });
 

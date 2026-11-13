@@ -20,8 +20,13 @@ export interface LoadedInput {
   /** The base as requested, resolved to a SHA. Differs from `baseSha` when the target branch has moved on since the branch point. */
   readonly requestedBaseSha: string;
   readonly headSha: string;
-  /** Commits in the pull request (reachable from head, not from the review base), oldest first. SHAs only, never messages. */
+  /**
+   * Commits in the pull request (reachable from head, not from the review base), oldest first. SHAs only, never messages.
+   * Capped at the newest 1000; `commitCount` is the true number.
+   */
   readonly commitShas: readonly string[];
+  /** How many commits the pull request really has, even when `commitShas` is capped. */
+  readonly commitCount: number;
 }
 
 export interface InputProvider {
@@ -34,7 +39,7 @@ export interface OutputSink {
 
 /** A fixed-code input failure. The message never quotes git output, paths or revisions. */
 export class InputError extends Error {
-  constructor(readonly code: "bad_revision" | "rev_not_found" | "no_merge_base" | "head_not_checked_out" | "tree_not_clean" | "git_failed" | "diff_mismatch" | "diff_unreadable") {
+  constructor(readonly code: "bad_revision" | "rev_not_found" | "no_merge_base" | "head_behind_base" | "head_not_checked_out" | "tree_not_clean" | "git_failed" | "diff_mismatch" | "diff_unreadable") {
     super(code);
     this.name = "InputError";
   }
@@ -48,8 +53,13 @@ export interface LocalGitOptions {
   readonly diffFile?: string;
 }
 
-/** Fixed diff options, so the output never depends on the repository's or the user's git configuration. */
-const DIFF_OPTIONS = ["--no-ext-diff", "--no-textconv", "--no-color", "--binary", "--find-renames", "--src-prefix=a/", "--dst-prefix=b/"] as const;
+/**
+ * Fixed diff options, so the output never depends on the repository's or the user's git configuration. `-l1000` overrides
+ * diff.renameLimit (a repository setting of 1 turns every rename into a delete plus an add); `--unified=3`,
+ * `--inter-hunk-context=0` and `--diff-algorithm=myers` override diff.context, diff.interHunkContext and diff.algorithm, so
+ * the reviewer always sees the same hunks. These are git's defaults, so a diff made with plain `git diff` still matches.
+ */
+const DIFF_OPTIONS = ["--no-ext-diff", "--no-textconv", "--no-color", "--binary", "--find-renames", "-l1000", "--unified=3", "--inter-hunk-context=0", "--diff-algorithm=myers", "--src-prefix=a/", "--dst-prefix=b/"] as const;
 const MAX_COMMITS = 1000;
 
 /**
@@ -88,10 +98,16 @@ export function localGitProvider(options: LocalGitOptions): InputProvider {
       if ((await git(["status", "--porcelain", "--untracked-files=all"])).trim() !== "") throw new InputError("tree_not_clean");
       const baseSha = (await git(["merge-base", requestedBaseSha, headSha]).catch(() => { throw new InputError("no_merge_base"); })).trim();
       if (!SHA.test(baseSha)) throw new InputError("no_merge_base");
+      // The head is an ancestor of the requested base (for example base and head swapped): the net change is empty and would
+      // read as a clean review of nothing. Refuse it. Asking for base = head is allowed and simply has nothing to review.
+      if (baseSha === headSha && requestedBaseSha !== headSha) throw new InputError("head_behind_base");
       const diffText = await git(["diff", ...DIFF_OPTIONS, baseSha, headSha]);
       if (options.diffFile !== undefined) await checkSuppliedDiff(options.diffFile, diffText);
-      const commitShas = (await git(["rev-list", "--reverse", `--max-count=${MAX_COMMITS}`, `${baseSha}..${headSha}`])).split(/\r?\n/).filter((l) => SHA.test(l));
-      return { diffText, repoRoot: options.repoDir, baseSha, requestedBaseSha, headSha, commitShas };
+      const range = `${baseSha}..${headSha}`;
+      const commitShas = (await git(["rev-list", "--reverse", `--max-count=${MAX_COMMITS}`, range])).split(/\r?\n/).filter((l) => SHA.test(l));
+      const commitCount = Number((await git(["rev-list", "--count", range])).trim());
+      if (!Number.isSafeInteger(commitCount) || commitCount < commitShas.length) throw new InputError("git_failed");
+      return { diffText, repoRoot: options.repoDir, baseSha, requestedBaseSha, headSha, commitShas, commitCount };
     },
   };
 }

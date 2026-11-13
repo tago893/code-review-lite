@@ -47,6 +47,7 @@ export interface Run {
   /** The artifact's folder or file name. Never an absolute path, so results do not depend on where the artifact sits. */
   readonly runId: string;
   readonly status: "complete" | "incomplete";
+  /** Why an incomplete run stopped; for a complete run, null, or "nothing_to_review" when it was skipped without a model call. */
   readonly reason: string | null;
   readonly baseSha: string | null;
   readonly headSha: string | null;
@@ -182,7 +183,7 @@ const leanSchema = z.object({
   tokensOut: count.optional(),
   baseSha: z.string().optional(),
   headSha: z.string().optional(),
-});
+}).refine((f) => f.status === "incomplete" || f.reason === undefined || f.reason === "nothing_to_review", { message: "a complete run may only carry the reason nothing_to_review" });
 
 const traceLine = z.object({ event: z.string(), ms: count.optional(), status: z.union([z.string(), z.number()]).optional(), code: z.string().optional() });
 
@@ -208,7 +209,8 @@ function loadLean(dir: string): Run {
     source: "lean",
     runId: basename(dir),
     status: file.status,
-    reason: file.status === "incomplete" ? (file.reason ?? "unknown") : null,
+    // A complete run normally has no reason; "nothing_to_review" marks one that was skipped without a model call.
+    reason: file.status === "incomplete" ? (file.reason ?? "unknown") : (file.reason ?? null),
     baseSha: file.baseSha ?? null,
     headSha: file.headSha ?? null,
     findings: file.findings,

@@ -43,15 +43,23 @@ export interface ReviewPlan {
 
 export type Disposition = "review" | "skip_clean" | "manual_review";
 
-/** Exclusions that are safe to omit: a pure rename, or a file that declares itself machine-generated. Everything else is unanalysed. */
-const SAFE_TO_OMIT: ReadonlySet<ExclusionKind> = new Set<ExclusionKind>(["rename_only", "generated"]);
-const DOC_EXTENSION = /\.(?:md|mdx|txt|rst)$/i;
-const DOC_NAME = /^(?:readme|license|licence|changelog|contributing|notice)(?:\.|$)/i;
-const AGENT_CONFIG = /(?:^|\/)(?:agents|claude|gemini)\.md$/i;
+/**
+ * Exclusions that are safe to omit: only a pure rename. A "generated" file is excluded from the model's input but is NOT
+ * safe to omit: the marker is a comment anyone can write, so a change hidden behind it is listed as unreviewed and can never
+ * turn into a clean skip on its own.
+ */
+const SAFE_TO_OMIT: ReadonlySet<ExclusionKind> = new Set<ExclusionKind>(["rename_only"]);
+// .txt is not a documentation extension (requirements.txt and CMakeLists.txt are code), matching src/risk/paths.ts.
+const DOC_EXTENSION = /\.(?:md|mdx|rst|adoc)$/i;
+// Conventional documentation names, bare or with a documentation extension: LICENSE, README.txt; not src/notice.ts.
+const DOC_NAME = /^(?:readme|license|licence|changelog|contributing|notice)(?:\.(?:md|mdx|rst|adoc|txt))?$/i;
+// Markdown that coding agents and CI read as instructions or configuration: not documentation, always reviewed.
+const AGENT_CONFIG_FILE = /(?:^|\/)(?:agents|claude|gemini|skill)\.md$/i;
+const AGENT_CONFIG_DIR = /(?:^|\/)\.(?:github|claude|cursor|windsurf|continue|gemini|codex)\//i;
 
 /** Documentation a model cannot usefully review. Agent instruction files and CI config are not documentation. */
 function isDocumentation(path: string): boolean {
-  if (AGENT_CONFIG.test(path) || path.startsWith(".github/")) return false;
+  if (AGENT_CONFIG_FILE.test(path) || AGENT_CONFIG_DIR.test(path)) return false;
   const name = path.split("/").pop() ?? path;
   return DOC_EXTENSION.test(name) || DOC_NAME.test(name);
 }
