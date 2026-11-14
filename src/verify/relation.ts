@@ -13,7 +13,7 @@ const NOT_A_SYMBOL = new Set(["if", "for", "while", "switch", "catch", "return",
 const HUNK_CONTEXT = /^@@[^@]*@@ ?(.*)$/;
 const IDENTIFIER = /[A-Za-z_$][\w$]*/g;
 
-function symbolsIn(line: string): string[] {
+export function declaredSymbols(line: string): string[] {
   const found = [...line.matchAll(DECLARATION)].map((m) => m[1] ?? "");
   const method = METHOD.exec(line)?.[1];
   if (method !== undefined) found.push(method);
@@ -24,10 +24,10 @@ function symbolsIn(line: string): string[] {
 export function changedSymbols(entries: readonly DiffEntry[]): ReadonlySet<string> {
   const symbols = new Set<string>();
   for (const entry of entries) {
-    for (const line of [...entry.addedLines, ...entry.removedLines]) for (const s of symbolsIn(line)) symbols.add(s);
+    for (const line of [...entry.addedLines, ...entry.removedLines]) for (const s of declaredSymbols(line)) symbols.add(s);
     for (const line of entry.patch.split("\n")) {
       const context = HUNK_CONTEXT.exec(line)?.[1];
-      if (context) for (const s of symbolsIn(context)) symbols.add(s);
+      if (context) for (const s of declaredSymbols(context)) symbols.add(s);
     }
   }
   return symbols;

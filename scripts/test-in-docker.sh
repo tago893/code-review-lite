@@ -8,6 +8,7 @@ root="$(cd "$(dirname "$0")/.." && (pwd -W 2>/dev/null || pwd))"
 export MSYS_NO_PATHCONV=1
 docker run --rm \
   -v "$root":/src:ro \
+  -e VITEST_ARGS="$*" \
   node:22-slim \
   bash -c '
     set -euo pipefail
@@ -21,5 +22,5 @@ docker run --rm \
     git config --global user.email t@example.com; git config --global user.name t; git config --global init.defaultBranch main
     npm ci --no-audit --no-fund --loglevel=error
     npx tsc --noEmit && echo "tsc: ok"
-    npx vitest run
+    npx vitest run ${VITEST_ARGS:-}
   '
