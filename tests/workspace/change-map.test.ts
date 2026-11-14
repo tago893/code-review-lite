@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { planReview } from "../../src/plan.js";
 import type { DiffEntry } from "../../src/types.js";
-import { buildChangeMap } from "../../src/workspace/change-map.js";
+import { buildChangeMap, renderChangeMap, type ChangeMap } from "../../src/workspace/change-map.js";
 
 const FIXTURE = resolve("tests/fixtures/change-map");
 const HOLD = "app/services/hold_service.py";
@@ -140,5 +140,49 @@ describe("change map: edge cases", () => {
     expect(getHold.callers.map((c) => [c.path, c.line, c.caller])).toEqual([
       [HOLD, 124, { name: "_require_active", startLine: 123, endLine: 127 }],
     ]);
+  });
+});
+
+describe("renderChangeMap", () => {
+  const case001 = async (): Promise<ChangeMap> =>
+    buildChangeMap(join(FIXTURE, "case001"), entriesOf(readFileSync(join(FIXTURE, "case001.diff"), "utf8")), CASE_FILES);
+
+  it("renders the index first, then numbered caller code", async () => {
+    const text = renderChangeMap(await case001());
+    expect(text.startsWith("Changed functions and who calls them (found by text search before the review; a caller may be missing or unrelated):\n")).toBe(true);
+    expect(text).toContain("- app/services/hold_service.py:90-102 get_hold (changed lines 91-95, 97-102)\n");
+    expect(text).toContain("  - called at app/services/booking_service.py:29 in confirm (lines 28-51)\n");
+    expect(text).toContain("  - called at app/services/hold_service.py:124 in _require_active (lines 123-127)\n");
+    expect(text).toContain("\nCaller code:\n--- app/services/booking_service.py:28-51 (confirm) ---\n");
+    expect(text).toContain("   29          hold = self._holds.get_hold(hold_id)\n");
+    expect(text.indexOf("Caller code:")).toBeGreaterThan(text.lastIndexOf("  - called at"));
+  });
+
+  it("renders nothing for an empty map", () => {
+    expect(renderChangeMap({ functions: [], omittedFunctions: 0, unreadableFiles: 0 })).toBe("");
+  });
+
+  it("keeps the index and drops caller slices that do not fit", async () => {
+    const full = await case001();
+    const short = renderChangeMap(full, 400);
+    expect(short.length).toBeLessThanOrEqual(400 + 120);
+    expect(short).toContain("- app/services/hold_service.py:90-102 get_hold");
+    expect(short).toContain("caller slices omitted for length; read them with cra_read]");
+    expect(renderChangeMap(full)).not.toContain("omitted for length");
+  });
+
+  it("says when callers were capped, not searched, or functions omitted", () => {
+    const span = { name: "go", startLine: 1, endLine: 2 };
+    const map: ChangeMap = {
+      functions: [{ path: "a.py", span, changedLines: [2], callersSearched: false, callers: [], moreCallers: 0 },
+        { path: "b.py", span, changedLines: [1, 2, 4], callersSearched: true, callers: [], moreCallers: 3 }],
+      omittedFunctions: 2, unreadableFiles: 0,
+    };
+    const text = renderChangeMap(map);
+    expect(text).toContain("  [callers not searched: name too short or special]\n");
+    expect(text).toContain("  [3 more callers not listed]\n");
+    expect(text).toContain("(changed lines 1-2, 4)");
+    expect(text).toContain("[2 more changed functions not listed]\n");
+    expect(text).not.toContain("Caller code:");
   });
 });

@@ -174,7 +174,7 @@ describe.skipIf(!hasGit)("a changed function with an unchanged caller", () => {
     const { repo, base, head } = await build();
     const p = await prepareReview(repo, base, head);
     expect(paths(p)).toEqual(["src/pay.ts"]);
-    expect(shared(p)).not.toContain("checkout.ts");
+    expect(shared(p).split("\nDiff:\n")[1]).not.toContain("checkout.ts"); // the diff omits it; the change map names it as a caller
     expect(snapshot(p, "src/checkout.ts")).toBe(BASE_FILES["src/checkout.ts"]);
   });
 

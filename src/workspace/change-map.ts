@@ -157,3 +157,59 @@ export async function buildChangeMap(snapshotRoot: string, entries: readonly Dif
     unreadableFiles: unreadable,
   });
 }
+
+const MAP_HEADING = "Changed functions and who calls them (found by text search before the review; a caller may be missing or unrelated):";
+const SLICES_OMITTED = "[caller slices omitted for length; read them with cra_read]";
+const SLICE_NUMBER_WIDTH = 5;
+
+/** Consecutive line numbers as ranges: [91,92,93,97] -> "91-93, 97". */
+function lineRanges(lines: readonly number[]): string {
+  const ranges: string[] = [];
+  for (let i = 0; i < lines.length; ) {
+    let j = i;
+    while (j + 1 < lines.length && lines[j + 1] === lines[j]! + 1) j++;
+    ranges.push(j === i ? `${lines[i]}` : `${lines[i]}-${lines[j]}`);
+    i = j + 1;
+  }
+  return ranges.join(", ");
+}
+
+function indexLines(fn: ChangedFunction): string[] {
+  const out = [`- ${fn.path}:${fn.span.startLine}-${fn.span.endLine} ${fn.span.name} (changed lines ${lineRanges(fn.changedLines)})`];
+  for (const site of fn.callers) {
+    const where = site.caller ? ` in ${site.caller.name} (lines ${site.caller.startLine}-${site.caller.endLine})` : "";
+    out.push(`  - called at ${site.path}:${site.line}${where}`);
+  }
+  if (fn.moreCallers > 0) out.push(`  [${fn.moreCallers} more callers not listed]`);
+  if (!fn.callersSearched) out.push("  [callers not searched: name too short or special]");
+  return out;
+}
+
+function sliceBlock(site: CallSite): string {
+  const { slice } = site;
+  const name = site.caller ? ` (${site.caller.name})` : "";
+  const numbered = slice.text.split("\n").map((line, i) => `${String(slice.startLine + i).padStart(SLICE_NUMBER_WIDTH)}  ${line}`);
+  return `--- ${site.path}:${slice.startLine}-${slice.endLine}${name} ---\n${numbered.join("\n")}\n`;
+}
+
+/** The map as prompt text: an index of changed functions and callers, then caller code while it fits in `maxChars`. */
+export function renderChangeMap(map: ChangeMap, maxChars: number = MAX_CHANGE_MAP_CHARS): string {
+  if (map.functions.length === 0) return "";
+  const index = map.functions.flatMap(indexLines);
+  if (map.omittedFunctions > 0) index.push(`[${map.omittedFunctions} more changed functions not listed]`);
+  let text = `${MAP_HEADING}\n${index.join("\n")}\n`;
+  const seen = new Set<string>();
+  let slices = "";
+  let omitted = false;
+  for (const site of map.functions.flatMap((f) => f.callers)) {
+    const key = `${site.path}:${site.slice.startLine}-${site.slice.endLine}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const block = sliceBlock(site);
+    const heading = slices === "" ? "\nCaller code:\n" : "";
+    if (text.length + heading.length + slices.length + block.length > maxChars) { omitted = true; continue; }
+    slices += `${heading}${block}`;
+  }
+  text += slices;
+  return omitted ? `${text}${SLICES_OMITTED}\n` : text;
+}

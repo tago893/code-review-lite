@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { ReviewerPaths } from "../agents/reviewers.js";
 import type { ReviewPlan } from "../plan.js";
 import { redactSecrets } from "../safety/redact.js";
+import { renderChangeMap, type ChangeMap } from "./change-map.js";
 import { WorkspaceError } from "./errors.js";
 
 // Writes and reads the review context under /review/context. Writing happens on the trusted side before the agent
@@ -48,16 +49,17 @@ const planSchema = z.object({
 /** A patch file name for a repo path: separators and anything unusual become "__" / "_", so it stays inside patches/. */
 export const patchFileName = (path: string): string => `${path.replace(/\//g, "__").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, MAX_PATCH_NAME)}.patch`;
 
-/** Writes shared-context.txt, patches/<file>.patch, plan.json and, last, the READY marker. */
-export async function writeReviewContext(ctxDir: string, plan: ReviewPlan, meta: ContextMeta): Promise<void> {
+/** Writes shared-context.txt, patches/<file>.patch, plan.json, change-map.json (when given) and, last, the READY marker. */
+export async function writeReviewContext(ctxDir: string, plan: ReviewPlan, meta: ContextMeta, changeMap?: ChangeMap): Promise<void> {
   await mkdir(join(ctxDir, "patches"), { recursive: true, mode: 0o755 });
   for (const entry of plan.entries) await writeFile(join(ctxDir, "patches", patchFileName(entry.newPath)), entry.patch, { mode: 0o644, flag: "w" });
-  await writeFile(join(ctxDir, "shared-context.txt"), sharedContext(plan, meta), { mode: 0o644 });
+  await writeFile(join(ctxDir, "shared-context.txt"), sharedContext(plan, meta, changeMap), { mode: 0o644 });
+  if (changeMap) await writeFile(join(ctxDir, "change-map.json"), JSON.stringify(changeMap), { mode: 0o644 });
   await writeFile(join(ctxDir, "plan.json"), JSON.stringify({ ...plan, meta }), { mode: 0o644 });
   await writeFile(join(ctxDir, READY), "ready\n", { mode: 0o644 });
 }
 
-function sharedContext(plan: ReviewPlan, meta: ContextMeta): string {
+function sharedContext(plan: ReviewPlan, meta: ContextMeta, changeMap?: ChangeMap): string {
   const diff = plan.entries.map((e) => e.patch).join("");
   const header = [
     `Review of ${meta.baseSha.slice(0, 12)}..${meta.headSha.slice(0, 12)}; tier ${plan.tier}; ${plan.size.changedLines} changed lines in ${plan.size.files} files.`,
@@ -65,6 +67,7 @@ function sharedContext(plan: ReviewPlan, meta: ContextMeta): string {
     plan.withheld.length > 0 ? `Changed, content withheld (sensitive): ${plan.withheld.join(", ")}` : "",
     plan.excluded.length > 0 ? `Not reviewed:\n${plan.excluded.map((x) => `- ${x.path} (${x.kind}: ${x.reason})`).join("\n")}` : "",
     plan.uncertainties.length > 0 ? `Behavior impact unknown:\n${plan.uncertainties.map((u) => `- ${u}`).join("\n")}` : "",
+    changeMap ? renderChangeMap(changeMap).trimEnd() : "",
   ].filter((s) => s !== "").join("\n\n");
   const room = Math.max(0, MAX_SHARED_CONTEXT_CHARS - header.length);
   const body = diff.length > room

@@ -1,5 +1,6 @@
 import { InputError, localGitProvider } from "../io/provider.js";
 import { planReview } from "../plan.js";
+import { buildChangeMap } from "../workspace/change-map.js";
 import { toWorkspaceError } from "../workspace/errors.js";
 import { prepareWorkspace } from "../workspace/prepare.js";
 import { writeReviewContext } from "../workspace/review-context.js";
@@ -18,7 +19,8 @@ export async function prepare(cmd: Prepare): Promise<{ readonly exitCode: 0 | 2;
     if (!planned.ok) return { exitCode: 2, status: planned.reason };
     const snapshot = await prepareWorkspace({ sourceDir: input.repoRoot, outDir: cmd.outRepo });
     if (snapshot.status === "error") return { exitCode: 2, status: `workspace_${snapshot.code}` };
-    await writeReviewContext(cmd.outCtx, planned.plan, { baseSha: input.baseSha, headSha: input.headSha, requestedBaseSha: input.requestedBaseSha, commitShas: input.commitShas, commitCount: input.commitCount });
+    const changeMap = await buildChangeMap(cmd.outRepo, planned.plan.entries, snapshot.copied.map((f) => f.path));
+    await writeReviewContext(cmd.outCtx, planned.plan, { baseSha: input.baseSha, headSha: input.headSha, requestedBaseSha: input.requestedBaseSha, commitShas: input.commitShas, commitCount: input.commitCount }, changeMap);
     return { exitCode: 0, status: "ready" };
   } catch (error) {
     return { exitCode: 2, status: error instanceof InputError ? error.code : `workspace_${toWorkspaceError(error).code}` };
