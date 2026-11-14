@@ -11,10 +11,14 @@ export interface FunctionSpan {
 const BRACE_EXTENSIONS: ReadonlySet<string> = new Set([
   ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".java", ".go", ".rs", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".kt", ".swift", ".php", ".scala",
 ]);
-const BRACE_SCAN_LINES = 400;
+const BRACE_SCAN_LINES = 3_000;
 const MAX_LINES_TO_OPEN_BRACE = 3;
 const PY_DEFINITION = /^\s*(?:async\s+)?(?:def|class)\s+(\w+)/;
-const STRING_LITERAL = /(["'`])(?:\.|(?!\1).)*\1/g;
+const STRING_LITERAL = /(["'`])(?:\\.|(?!\1).)*\1/g;
+const FOR_LOOP = /^for[\s(]/;
+const KEYWORD_DECLARATION = /\b(?:function\*?|class|interface|type|enum|const|let|var|def|fn|func|struct|trait)\s/;
+const VARIABLE_DECLARATION = /\b(?:const|let|var)\s/;
+const FUNCTION_VALUE = /=>|\bfunction\b/;
 
 const extensionOf = (path: string): string => extname(path).toLowerCase();
 export const isSupportedSource = (path: string): boolean => extensionOf(path) === ".py" || BRACE_EXTENSIONS.has(extensionOf(path));
@@ -29,21 +33,33 @@ const BRACE_COMMENT = /\/\/.*$/;
 /** The line without string literals and the trailing comment, for counting brackets. */
 const code = (line: string, comment: RegExp): string => line.replace(STRING_LITERAL, '""').replace(comment, "");
 
-/** Index of the line where the signature starting at `from` ends: parentheses balanced and the line ends with ":". */
-function pythonSignatureEnd(lines: readonly string[], from: number): number {
+interface PythonHeader {
+  readonly endIndex: number;
+  /** True when code follows the header's colon on the same line (`def f(): return 1`). */
+  readonly oneLiner: boolean;
+}
+
+/** Where the header starting at `from` ends: the first colon outside any brackets. */
+function pythonHeaderEnd(lines: readonly string[], from: number): PythonHeader {
   let depth = 0;
   for (let i = from; i < lines.length; i++) {
     const text = code(lines[i] ?? "", PY_COMMENT);
-    for (const ch of text) depth += ch === "(" || ch === "[" ? 1 : ch === ")" || ch === "]" ? -1 : 0;
-    if (depth <= 0 && text.trimEnd().endsWith(":")) return i;
+    for (let c = 0; c < text.length; c++) {
+      const ch = text[c];
+      if (ch === "(" || ch === "[") depth++;
+      else if (ch === ")" || ch === "]") depth--;
+      else if (ch === ":" && depth <= 0) return { endIndex: i, oneLiner: text.slice(c + 1).trim() !== "" };
+    }
   }
-  return from;
+  return { endIndex: from, oneLiner: true };
 }
 
 /** Index of the last body line of the Python definition at `from`. */
 function pythonEnd(lines: readonly string[], from: number): number {
   const base = indentOf(lines[from] ?? "");
-  let last = pythonSignatureEnd(lines, from);
+  const header = pythonHeaderEnd(lines, from);
+  if (header.oneLiner) return header.endIndex;
+  let last = header.endIndex;
   for (let i = last + 1; i < lines.length; i++) {
     const line = lines[i] ?? "";
     if (isBlank(line)) continue;
@@ -64,7 +80,7 @@ function pythonEnclosing(lines: readonly string[], lineNo: number): FunctionSpan
 }
 
 /** Index of the line where the brace block declared at `from` closes, or undefined if no block opens there. */
-function braceEnd(lines: readonly string[], from: number): number | undefined {
+function braceEnd(lines: readonly string[], from: number, maxLinesToOpen: number): number | undefined {
   let depth = 0;
   let opened = false;
   for (let i = from; i < lines.length; i++) {
@@ -74,17 +90,33 @@ function braceEnd(lines: readonly string[], from: number): number | undefined {
       else if (ch === "}") depth--;
       if (opened && depth <= 0) return i;
     }
-    if (!opened && (text.includes(";") || i - from >= MAX_LINES_TO_OPEN_BRACE)) return undefined;
+    if (!opened && (text.includes(";") || i - from >= maxLinesToOpen)) return undefined;
   }
   return opened ? lines.length - 1 : undefined;
+}
+
+interface Declaration {
+  readonly name: string;
+  readonly maxLinesToOpen: number;
+}
+
+/** The function-like declaration on a line, or undefined for loops, object literals and plain calls. */
+function declarationOn(line: string): Declaration | undefined {
+  if (FOR_LOOP.test(line.trim())) return undefined;
+  const name = declaredSymbols(line)[0];
+  if (name === undefined) return undefined;
+  if (!KEYWORD_DECLARATION.test(line)) return { name, maxLinesToOpen: 0 };
+  if (VARIABLE_DECLARATION.test(line) && !FUNCTION_VALUE.test(line)) return undefined;
+  return { name, maxLinesToOpen: MAX_LINES_TO_OPEN_BRACE };
 }
 
 function braceEnclosing(lines: readonly string[], lineNo: number): FunctionSpan | undefined {
   const target = Math.min(lineNo, lines.length) - 1;
   for (let i = target; i >= 0 && target - i <= BRACE_SCAN_LINES; i--) {
-    const name = declaredSymbols(lines[i] ?? "")[0];
-    if (name === undefined) continue;
-    const end = braceEnd(lines, i);
+    const declaration = declarationOn(lines[i] ?? "");
+    if (declaration === undefined) continue;
+    const { name, maxLinesToOpen } = declaration;
+    const end = braceEnd(lines, i, maxLinesToOpen);
     if (end !== undefined && end >= target) return freeze(name, i + 1, end + 1);
   }
   return undefined;

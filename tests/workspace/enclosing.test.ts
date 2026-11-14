@@ -43,6 +43,16 @@ describe("enclosingFunction (Python, inline)", () => {
     expect(enclosingFunction("a.py", src, 5)).toEqual({ name: "handler", startLine: 2, endLine: 5 });
     expect(enclosingFunction("a.py", src, 3)).toEqual({ name: "handler", startLine: 2, endLine: 5 });
   });
+  it("does not stretch a one-line class over later code", () => {
+    const src = ["class NotFound(Exception): pass", "X = 1", "def later():", "    return 2"];
+    expect(enclosingFunction("a.py", src, 1)).toEqual({ name: "NotFound", startLine: 1, endLine: 1 });
+    expect(enclosingFunction("a.py", src, 2)).toBeUndefined();
+    expect(enclosingFunction("a.py", src, 4)).toEqual({ name: "later", startLine: 3, endLine: 4 });
+  });
+  it("is not fooled by an escaped quote in a signature default", () => {
+    const src = ['def f(a="\\"("):', "    return a", "x = 1"];
+    expect(enclosingFunction("a.py", src, 2)).toEqual({ name: "f", startLine: 1, endLine: 2 });
+  });
 });
 
 describe("enclosingFunction (brace languages)", () => {
@@ -58,6 +68,22 @@ describe("enclosingFunction (brace languages)", () => {
   it("is not fooled by a brace inside a string", () => {
     const src = ["function f() {", '  const s = "}";', "  return s;", "}"];
     expect(enclosingFunction("a.ts", src, 3)).toEqual({ name: "f", startLine: 1, endLine: 4 });
+  });
+  it("is not fooled by an escaped quote before a brace", () => {
+    const src = ["function f() {", '  const s = "\\"}";', "  return s;", "}"];
+    expect(enclosingFunction("a.ts", src, 3)).toEqual({ name: "f", startLine: 1, endLine: 4 });
+  });
+  it("names the function, not the loop variable, for a line in a for loop", () => {
+    const src = ["function outer() {", "  for (let i = 0; i < 3; i++) {", "    work(i);", "  }", "}"];
+    expect(enclosingFunction("a.ts", src, 3)).toEqual({ name: "outer", startLine: 1, endLine: 5 });
+  });
+  it("skips an object literal declared with const", () => {
+    const src = ["function outer() {", "  const cfg = {", "    a: 1,", "  };", "}"];
+    expect(enclosingFunction("a.ts", src, 3)).toEqual({ name: "outer", startLine: 1, endLine: 5 });
+  });
+  it("does not name a block after a semicolon-less call line", () => {
+    const src = ["class A {", "  run(): void {", "    render(x)", "    if (y) {", "      go();", "    }", "  }", "}"];
+    expect(enclosingFunction("a.ts", src, 5)).toEqual({ name: "run", startLine: 2, endLine: 7 });
   });
 });
 
